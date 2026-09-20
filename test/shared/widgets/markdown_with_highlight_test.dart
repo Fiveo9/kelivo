@@ -1114,6 +1114,46 @@ Inline ***strong emphasis*** text.
   });
 
   testWidgets(
+    'MarkdownWithCodeHighlight renders desktop table toolbar and selectable cells',
+    (tester) async {
+      _overrideMarkdownTablePlatform(TargetPlatform.windows);
+      String? selected;
+      await tester.pumpWidget(
+        _settingsHarness(
+          onSettingsReady: (_) {},
+          child: SelectionArea(
+            onSelectionChanged: (content) => selected = content?.plainText,
+            child: Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
+                width: 600,
+                child: const MarkdownWithCodeHighlight(
+                  text: '| Header1 | Header2 |\n| --- | --- |\n| Cell1 | Cell2 |',
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Table'), findsOneWidget);
+      expect(find.byTooltip('Copy'), findsOneWidget);
+      expect(find.byTooltip('Export CSV'), findsOneWidget);
+      expect(find.byTooltip('Export as Image'), findsOneWidget);
+
+      final region = tester.state<SelectableRegionState>(
+        find.byType(SelectableRegion),
+      );
+      region.selectAll(SelectionChangedCause.keyboard);
+      await tester.pumpAndSettle();
+
+      expect(selected, contains('Header1'));
+      expect(selected, contains('Cell2'));
+    },
+  );
+
+  testWidgets(
     'paragraph selection keeps line breaks through streaming',
     (tester) async {
       const text = 'First paragraph.\n\nSecond paragraph.';

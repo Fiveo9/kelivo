@@ -3613,100 +3613,89 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
             : MediaQuery.sizeOf(context).width;
         final shouldScrollHorizontally =
             !isExporting &&
-            useCompactTable &&
             rows.columnCount >= 4 &&
             columnWidth * rows.columnCount > viewportWidth;
         final table = _buildTable(
           context,
           borderColor: borderColor,
           headerBg: headerBg,
-          compact: useCompactTable,
+          compact: true,
           columnWidth: columnWidth,
           fixedColumns: shouldScrollHorizontally,
           rowCount: isExporting
               ? rows.rows.length
               : math.min(rows.rows.length, _visibleRows),
+          selectable: isDesktopPlatform || !shouldScrollHorizontally,
         );
 
         final tableSurface = _buildTableSurface(
           context,
           table: table,
-          // Compact tables already paint the card fill on the outer
-          // container; a second body fill would stack and hide wallpaper.
-          // During image capture the boundary is only this surface, so
-          // keep an opaque body fill or JPEG export turns holes black.
-          bodyBg: useCompactTable && !_capturingTableImage
-              ? Colors.transparent
-              : bodyBg,
+          // The card fill is painted on the outer container; a second body fill
+          // would stack and hide wallpaper. During image capture the boundary is
+          // only this surface, so keep an opaque body fill or JPEG export turns holes black.
+          bodyBg: !_capturingTableImage ? Colors.transparent : bodyBg,
           borderColor: borderColor,
-          compact: useCompactTable,
+          compact: true,
         );
-
-        if (!useCompactTable) {
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                tableSurface,
-                if (!isExporting) _buildRowPager(context),
-              ],
-            ),
-          );
-        }
 
         final l10n = AppLocalizations.of(context)!;
-        return SelectionContainer.disabled(
-          child: Container(
-            key: const ValueKey('markdown-table-block'),
-            width: double.infinity,
-            margin: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(
-              color: Color.alphaBlend(
-                cs.primary.withValues(alpha: isDark ? 0.045 : 0.018),
-                cs.surface,
-              ).withValues(alpha: kBlockFillAlphaTable),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            foregroundDecoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: borderColor, width: 0.8),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _MarkdownTableToolbar(
-                  label: l10n.markdownTableLabel,
-                  backgroundColor: headerBg,
-                  copyLabel: l10n.shareProviderSheetCopyButton,
-                  exportLabel: l10n.markdownTableExportCsvTooltip,
-                  imageActionLabel: isDesktopPlatform
-                      ? l10n.messageExportSheetExportImage
-                      : l10n.markdownTableSaveImageTooltip,
-                  onCopy: () => _copyMarkdown(context),
-                  onCopyImage: () => _copyImage(context),
-                  onExport: () => _exportCsv(context),
-                  onExportImage: () => _exportImage(context),
-                  onImageAction: () => isDesktopPlatform
-                      ? _exportImage(context)
-                      : _saveImageToGallery(context),
+        Widget tableBlock = Container(
+          key: const ValueKey('markdown-table-block'),
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          decoration: BoxDecoration(
+            color: Color.alphaBlend(
+              cs.primary.withValues(alpha: isDark ? 0.045 : 0.018),
+              cs.surface,
+            ).withValues(alpha: kBlockFillAlphaTable),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          foregroundDecoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: borderColor, width: 0.8),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _MarkdownTableToolbar(
+                label: l10n.markdownTableLabel,
+                backgroundColor: headerBg,
+                copyLabel: l10n.shareProviderSheetCopyButton,
+                exportLabel: l10n.markdownTableExportCsvTooltip,
+                imageActionLabel: isDesktopPlatform
+                    ? l10n.messageExportSheetExportImage
+                    : l10n.markdownTableSaveImageTooltip,
+                onCopy: () => _copyMarkdown(context),
+                onCopyImage: () => _copyImage(context),
+                onExport: () => _exportCsv(context),
+                onExportImage: () => _exportImage(context),
+                onImageAction: () => isDesktopPlatform
+                    ? _exportImage(context)
+                    : _saveImageToGallery(context),
+              ),
+              KeyedSubtree(
+                key: const ValueKey('markdown-table-body'),
+                child: _buildMobileTableViewport(
+                  scrollable: shouldScrollHorizontally,
+                  child: tableSurface,
                 ),
-                GestureDetector(
-                  key: const ValueKey('markdown-table-body'),
-                  behavior: HitTestBehavior.opaque,
-                  child: _buildMobileTableViewport(
-                    scrollable: shouldScrollHorizontally,
-                    child: tableSurface,
-                  ),
-                ),
-                if (!isExporting) _buildRowPager(context),
-              ],
-            ),
+              ),
+              if (!isExporting) _buildRowPager(context),
+            ],
           ),
         );
+
+        if (!isDesktopPlatform && shouldScrollHorizontally) {
+          tableBlock = SelectionContainer.disabled(child: tableBlock);
+        } else if (isDesktopPlatform &&
+            SelectionContainer.maybeOf(context) == null) {
+          tableBlock = SelectionArea(child: tableBlock);
+        }
+
+        return tableBlock;
       },
     );
   }
@@ -3719,6 +3708,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
     required double columnWidth,
     required bool fixedColumns,
     required int rowCount,
+    bool selectable = true,
   }) {
     final columnWidths = <int, TableColumnWidth>{
       for (int i = 0; i < rows.columnCount; i++)
@@ -3749,7 +3739,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
                   style: style,
                   config: config,
                   appFontFamily: appFontFamily,
-                  selectable: !compact,
+                  selectable: selectable,
                 ),
             ],
           ),
@@ -3761,27 +3751,29 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
     if (rows.rows.length <= _initialRows) return const SizedBox.shrink();
     final remaining = rows.rows.length - _visibleRows;
     final l10n = AppLocalizations.of(context)!;
-    return Row(
-      key: const ValueKey('markdown-table-row-pager'),
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        if (_visibleRows > _initialRows)
-          TextButton(
-            onPressed: () => setState(() => _visibleRows = _initialRows),
-            child: Text(l10n.largeContentCollapse),
-          ),
-        if (remaining > 0)
-          TextButton(
-            key: const ValueKey('markdown-table-show-more'),
-            onPressed: () => setState(
-              () => _visibleRows = math.min(
-                rows.rows.length,
-                _visibleRows + _rowPageSize,
-              ),
+    return SelectionContainer.disabled(
+      child: Row(
+        key: const ValueKey('markdown-table-row-pager'),
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          if (_visibleRows > _initialRows)
+            TextButton(
+              onPressed: () => setState(() => _visibleRows = _initialRows),
+              child: Text(l10n.largeContentCollapse),
             ),
-            child: Text(l10n.largeContentShowMore(remaining)),
-          ),
-      ],
+          if (remaining > 0)
+            TextButton(
+              key: const ValueKey('markdown-table-show-more'),
+              onPressed: () => setState(
+                () => _visibleRows = math.min(
+                  rows.rows.length,
+                  _visibleRows + _rowPageSize,
+                ),
+              ),
+              child: Text(l10n.largeContentShowMore(remaining)),
+            ),
+        ],
+      ),
     );
   }
 
@@ -4125,7 +4117,13 @@ class _MarkdownTableCell extends StatelessWidget {
       child: Align(
         alignment: _alignmentFor(data.alignment),
         child: selectable
-            ? SelectableText.rich(textSpan, textAlign: data.alignment)
+            ? Text.rich(
+                textSpan,
+                textAlign: data.alignment,
+                softWrap: true,
+                overflow: TextOverflow.visible,
+                textWidthBasis: TextWidthBasis.parent,
+              )
             : RichText(
                 text: textSpan,
                 textAlign: data.alignment,
@@ -4198,72 +4196,74 @@ class _MarkdownTableToolbar extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Container(
-      height: 38,
-      padding: const EdgeInsetsDirectional.only(start: 12, end: 6),
-      decoration: BoxDecoration(
-        color: backgroundColor,
-        border: Border(
-          bottom: BorderSide(
-            color: cs.outlineVariant.withValues(alpha: isDark ? 0.20 : 0.28),
-            width: 0.6,
+    return SelectionContainer.disabled(
+      child: Container(
+        height: 38,
+        padding: const EdgeInsetsDirectional.only(start: 12, end: 6),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          border: Border(
+            bottom: BorderSide(
+              color: cs.outlineVariant.withValues(alpha: isDark ? 0.20 : 0.28),
+              width: 0.6,
+            ),
           ),
         ),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: cs.onSurfaceVariant.withValues(alpha: 0.80),
-                fontSize: 12,
-                fontWeight: AppFontWeights.semibold,
-                height: 1.0,
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.80),
+                  fontSize: 12,
+                  fontWeight: AppFontWeights.semibold,
+                  height: 1.0,
+                ),
               ),
             ),
-          ),
-          Tooltip(
-            message: copyLabel,
-            child: IosIconButton(
-              icon: Lucide.Copy,
-              semanticLabel: copyLabel,
-              onTap: onCopy,
-              onLongPress: onCopyImage,
-              size: 15,
-              minSize: 32,
-              padding: const EdgeInsets.all(7),
-              color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+            Tooltip(
+              message: copyLabel,
+              child: IosIconButton(
+                icon: Lucide.Copy,
+                semanticLabel: copyLabel,
+                onTap: onCopy,
+                onLongPress: onCopyImage,
+                size: 15,
+                minSize: 32,
+                padding: const EdgeInsets.all(7),
+                color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+              ),
             ),
-          ),
-          Tooltip(
-            message: imageActionLabel,
-            child: IosIconButton(
-              icon: Lucide.ImageDown,
-              semanticLabel: imageActionLabel,
-              onTap: onImageAction,
-              onLongPress: onExportImage,
-              size: 15,
-              minSize: 32,
-              padding: const EdgeInsets.all(7),
-              color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+            Tooltip(
+              message: imageActionLabel,
+              child: IosIconButton(
+                icon: Lucide.ImageDown,
+                semanticLabel: imageActionLabel,
+                onTap: onImageAction,
+                onLongPress: onExportImage,
+                size: 15,
+                minSize: 32,
+                padding: const EdgeInsets.all(7),
+                color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+              ),
             ),
-          ),
-          Tooltip(
-            message: exportLabel,
-            child: IosIconButton(
-              icon: Lucide.Download,
-              semanticLabel: exportLabel,
-              onTap: onExport,
-              size: 15,
-              minSize: 32,
-              padding: const EdgeInsets.all(7),
-              color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+            Tooltip(
+              message: exportLabel,
+              child: IosIconButton(
+                icon: Lucide.Download,
+                semanticLabel: exportLabel,
+                onTap: onExport,
+                size: 15,
+                minSize: 32,
+                padding: const EdgeInsets.all(7),
+                color: cs.onSurfaceVariant.withValues(alpha: 0.68),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
