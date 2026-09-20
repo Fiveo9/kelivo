@@ -1143,7 +1143,7 @@ Inline ***strong emphasis*** text.
       expect(find.byTooltip('Export as Image'), findsOneWidget);
 
       final region = tester.state<SelectableRegionState>(
-        find.byType(SelectableRegion),
+        find.byType(SelectableRegion).first,
       );
       region.selectAll(SelectionChangedCause.keyboard);
       await tester.pumpAndSettle();

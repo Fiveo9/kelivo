@@ -3542,6 +3542,40 @@ String markdownTableRowsToMarkdownForTesting(List<List<String>> rows) =>
 @visibleForTesting
 TargetPlatform? markdownTableTargetPlatformOverride;
 
+class _TableCellSelectionCoordinator {
+  int? _activeCellIndex;
+  final Map<int, VoidCallback> _clearCallbacks = {};
+
+  void register(int index, VoidCallback clearCallback) {
+    _clearCallbacks[index] = clearCallback;
+  }
+
+  void unregister(int index) {
+    _clearCallbacks.remove(index);
+    if (_activeCellIndex == index) {
+      _activeCellIndex = null;
+    }
+  }
+
+  void onCellSelected(int index) {
+    if (_activeCellIndex != null && _activeCellIndex != index) {
+      final prevCallback = _clearCallbacks[_activeCellIndex];
+      _activeCellIndex = index;
+      prevCallback?.call();
+    } else {
+      _activeCellIndex = index;
+    }
+  }
+
+  void clearAll() {
+    if (_activeCellIndex != null) {
+      final callback = _clearCallbacks[_activeCellIndex];
+      _activeCellIndex = null;
+      callback?.call();
+    }
+  }
+}
+
 class _MarkdownTableBlock extends StatefulWidget {
   const _MarkdownTableBlock({
     required this.rows,
@@ -3563,6 +3597,8 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
   static const int _initialRows = 40;
   static const int _rowPageSize = 100;
   final GlobalKey _tableBoundaryKey = GlobalKey();
+  final _TableCellSelectionCoordinator _selectionCoordinator =
+      _TableCellSelectionCoordinator();
   int _visibleRows = _initialRows;
   bool _capturingTableImage = false;
 
@@ -3599,8 +3635,6 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
       builder: (context, constraints) {
         final bool isDesktopPlatform = _markdownTableTargetPlatformIsDesktop();
         final bool isExporting = ExportCaptureScope.of(context);
-        final bool useCompactTable =
-            !isDesktopPlatform || constraints.maxWidth < 520;
 
         final columnWidth = _compactColumnWidth(
           constraints.maxWidth.isFinite
@@ -3625,7 +3659,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
           rowCount: isExporting
               ? rows.rows.length
               : math.min(rows.rows.length, _visibleRows),
-          selectable: isDesktopPlatform || !shouldScrollHorizontally,
+          selectable: isDesktopPlatform,
         );
 
         final tableSurface = _buildTableSurface(
@@ -3688,14 +3722,12 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
           ),
         );
 
-        if (!isDesktopPlatform && shouldScrollHorizontally) {
-          tableBlock = SelectionContainer.disabled(child: tableBlock);
-        } else if (isDesktopPlatform &&
-            SelectionContainer.maybeOf(context) == null) {
-          tableBlock = SelectionArea(child: tableBlock);
-        }
-
-        return tableBlock;
+        return SelectableAdapter(
+          selectedText: rows.toMarkdown(),
+          child: SelectionContainer.disabled(
+            child: tableBlock,
+          ),
+        );
       },
     );
   }
@@ -3734,6 +3766,9 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
             children: [
               for (int c = 0; c < rows.columnCount; c++)
                 _MarkdownTableCell(
+                  key: ValueKey('cell_${r}_$c'),
+                  cellIndex: r * rows.columnCount + c,
+                  coordinator: _selectionCoordinator,
                   data: rows.rows[r].cells[c],
                   header: r == 0,
                   style: style,
@@ -3798,7 +3833,13 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
             ),
       child: DefaultTextStyle.merge(
         style: TextStyle(color: cs.onSurface, fontFamily: appFontFamily),
-        child: table,
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (_) {
+            _selectionCoordinator.clearAll();
+          },
+          child: table,
+        ),
       ),
     );
 
@@ -4074,8 +4115,11 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
   }
 }
 
-class _MarkdownTableCell extends StatelessWidget {
+class _MarkdownTableCell extends StatefulWidget {
   const _MarkdownTableCell({
+    super.key,
+    required this.cellIndex,
+    required this.coordinator,
     required this.data,
     required this.header,
     required this.style,
@@ -4084,6 +4128,8 @@ class _MarkdownTableCell extends StatelessWidget {
     required this.selectable,
   });
 
+  final int cellIndex;
+  final _TableCellSelectionCoordinator? coordinator;
   final _MarkdownTableCellData data;
   final bool header;
   final TextStyle style;
@@ -4092,17 +4138,54 @@ class _MarkdownTableCell extends StatelessWidget {
   final bool selectable;
 
   @override
+  State<_MarkdownTableCell> createState() => _MarkdownTableCellState();
+}
+
+class _MarkdownTableCellState extends State<_MarkdownTableCell> {
+  int _revision = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.coordinator?.register(widget.cellIndex, _clear);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MarkdownTableCell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.cellIndex != widget.cellIndex ||
+        oldWidget.coordinator != widget.coordinator) {
+      oldWidget.coordinator?.unregister(oldWidget.cellIndex);
+      widget.coordinator?.register(widget.cellIndex, _clear);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.coordinator?.unregister(widget.cellIndex);
+    super.dispose();
+  }
+
+  void _clear() {
+    if (mounted) {
+      setState(() {
+        _revision++;
+      });
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final baseStyle = style.copyWith(
-      fontSize: header ? 13.0 : 13.5,
+    final baseStyle = widget.style.copyWith(
+      fontSize: widget.header ? 13.0 : 13.5,
       height: 1.42,
-      fontWeight: header ? AppFontWeights.semibold : AppFontWeights.regular,
-      color: header ? cs.onSurface : cs.onSurface.withValues(alpha: 0.90),
-      fontFamily: appFontFamily ?? style.fontFamily,
+      fontWeight: widget.header ? AppFontWeights.semibold : AppFontWeights.regular,
+      color: widget.header ? cs.onSurface : cs.onSurface.withValues(alpha: 0.90),
+      fontFamily: widget.appFontFamily ?? widget.style.fontFamily,
     );
-    final innerCfg = config.copyWith(style: baseStyle);
-    final cellText = data.text.trim().replaceAll(_codeDollarMask, r'$');
+    final innerCfg = widget.config.copyWith(style: baseStyle);
+    final cellText = widget.data.text.trim().replaceAll(_codeDollarMask, r'$');
     final displayText = _softBreakTableCellText(cellText);
     final spans = MarkdownComponent.generate(
       context,
@@ -4112,25 +4195,36 @@ class _MarkdownTableCell extends StatelessWidget {
     );
     final textSpan = TextSpan(style: baseStyle, children: spans);
 
+    Widget textWidget = Text.rich(
+      textSpan,
+      textAlign: widget.data.alignment,
+      softWrap: true,
+      overflow: TextOverflow.visible,
+      textWidthBasis: TextWidthBasis.parent,
+    );
+
+    if (widget.selectable) {
+      textWidget = SelectionArea(
+        key: ValueKey('cell_${widget.cellIndex}_$_revision'),
+        onSelectionChanged: (content) {
+          if (content != null && content.plainText.isNotEmpty) {
+            widget.coordinator?.onCellSelected(widget.cellIndex);
+          }
+        },
+        contextMenuBuilder: (context, selectableRegionState) {
+          return AdaptiveTextSelectionToolbar.selectableRegion(
+            selectableRegionState: selectableRegionState,
+          );
+        },
+        child: textWidget,
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       child: Align(
-        alignment: _alignmentFor(data.alignment),
-        child: selectable
-            ? Text.rich(
-                textSpan,
-                textAlign: data.alignment,
-                softWrap: true,
-                overflow: TextOverflow.visible,
-                textWidthBasis: TextWidthBasis.parent,
-              )
-            : RichText(
-                text: textSpan,
-                textAlign: data.alignment,
-                softWrap: true,
-                overflow: TextOverflow.visible,
-                textWidthBasis: TextWidthBasis.parent,
-              ),
+        alignment: _alignmentFor(widget.data.alignment),
+        child: textWidget,
       ),
     );
   }
