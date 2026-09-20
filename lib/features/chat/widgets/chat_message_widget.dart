@@ -1130,6 +1130,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   // User message context menu state
   final GlobalKey _userBubbleKey = GlobalKey();
   OverlayEntry? _userMenuOverlay;
+  String? _userSelectedText;
   // Desktop anchored menus for bottom action buttons
   final GlobalKey _moreBtnKey1 = GlobalKey();
   final GlobalKey _moreBtnKey2 = GlobalKey();
@@ -1177,6 +1178,9 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   @override
   void didUpdateWidget(covariant ChatMessageWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.id != widget.message.id) {
+      _userSelectedText = null;
+    }
     _syncTicker();
     // Auto-collapse when inline <think> transitions from loading -> finished
     _applyAutoCollapseInlineThinkIfFinished(oldWidget: oldWidget);
@@ -2005,13 +2009,33 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     try {
       Haptics.light();
     } catch (_) {}
+    final selectedText = _userSelectedText?.trim();
+    final hasSelection = selectedText != null && selectedText.isNotEmpty;
+
     await showDesktopContextMenuAt(
       context,
       globalPosition: globalPosition,
       items: [
+        if (hasSelection)
+          DesktopContextMenuItem(
+            icon: Lucide.Copy,
+            label: l10n.shareProviderSheetCopyButton,
+            onTap: () async {
+              await Clipboard.setData(ClipboardData(text: _userSelectedText!));
+              if (mounted) {
+                showAppSnackBar(
+                  context,
+                  message: l10n.chatMessageWidgetCopiedToClipboard,
+                  type: NotificationType.success,
+                );
+              }
+            },
+          ),
         DesktopContextMenuItem(
-          icon: Lucide.Copy,
-          label: l10n.shareProviderSheetCopyButton,
+          icon: hasSelection ? Lucide.CopyCheck : Lucide.Copy,
+          label: hasSelection
+              ? l10n.selectCopyPageCopyAll
+              : l10n.shareProviderSheetCopyButton,
           onTap: () async {
             if (widget.onCopy != null) {
               widget.onCopy!.call();
@@ -2095,6 +2119,9 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     if (isDesktop) {
       content = SelectionArea(
         key: ValueKey('user_${widget.message.id}'),
+        onSelectionChanged: (selectedContent) {
+          _userSelectedText = selectedContent?.plainText;
+        },
         child: content,
       );
     }
