@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, TargetPlatform, visibleForTesting;
+import 'package:flutter/rendering.dart' show SelectedContent;
 import 'dart:ui' as ui;
 import 'dart:math' as math;
 import 'package:flutter/services.dart';
@@ -2033,7 +2034,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             },
           ),
         DesktopContextMenuItem(
-          icon: hasSelection ? Lucide.CopyCheck : Lucide.Copy,
+          icon: hasSelection ? Lucide.ClipboardCheck : Lucide.Copy,
           label: hasSelection
               ? l10n.selectCopyPageCopyAll
               : l10n.shareProviderSheetCopyButton,
