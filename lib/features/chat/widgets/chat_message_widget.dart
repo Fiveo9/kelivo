@@ -43,6 +43,7 @@ import '../../../shared/widgets/ios_checkbox.dart';
 import '../../../shared/widgets/ios_tactile.dart';
 import '../../../shared/widgets/thinking_sheen.dart';
 import '../../../desktop/desktop_context_menu.dart';
+import '../../../desktop/desktop_selection_area.dart';
 import '../../../desktop/menu_anchor.dart';
 import '../../../shared/widgets/emoji_text.dart';
 import '../../../utils/platform_utils.dart';
@@ -939,7 +940,7 @@ class _ToolDetailBody extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return SelectionArea(
+    return DesktopFloatingSelectionArea(
       child: CustomScrollView(
         controller: scrollController,
         slivers: [
@@ -2117,7 +2118,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     }
 
     if (isDesktop) {
-      content = SelectionArea(
+      content = DesktopFloatingSelectionArea(
         key: ValueKey('user_${widget.message.id}'),
         onSelectionChanged: (selectedContent) {
           _userSelectedText = selectedContent?.plainText;
@@ -2525,7 +2526,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     );
 
     return RepaintBoundary(
-      child: SelectionArea(
+      child: DesktopFloatingSelectionArea(
         key: ValueKey(
           contentKey.isEmpty
               ? 'assistant_${widget.message.id}'
@@ -3197,7 +3198,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
                             Padding(
                               padding: const EdgeInsets.fromLTRB(8, 2, 8, 6),
                               child: RepaintBoundary(
-                                child: SelectionArea(
+                                child: DesktopFloatingSelectionArea(
                                   key: ValueKey(
                                     'translation_${widget.message.id}',
                                   ),
@@ -5138,17 +5139,21 @@ class _ChainOfThoughtReasoningStepState
                 child: SingleChildScrollView(
                   controller: _scroll,
                   physics: const BouncingScrollPhysics(),
-                  child: SelectionArea(child: reasoningContent(display)),
+                  child: DesktopFloatingSelectionArea(
+                    child: reasoningContent(display),
+                  ),
                 ),
               )
             : SingleChildScrollView(
                 controller: _scroll,
                 physics: const NeverScrollableScrollPhysics(),
-                child: SelectionArea(child: reasoningContent(display)),
+                child: DesktopFloatingSelectionArea(
+                  child: reasoningContent(display),
+                ),
               ),
       );
     } else if (state == _ReasoningStepState.expanded) {
-      content = SelectionArea(child: reasoningContent(display));
+      content = DesktopFloatingSelectionArea(child: reasoningContent(display));
     }
 
     return _TimelineStepShell(
@@ -7200,7 +7205,7 @@ class _ReasoningSectionState extends State<_ReasoningSection> {
     }
 
     // Enable long-press text selection in reasoning body
-    body = SelectionArea(child: body);
+    body = DesktopFloatingSelectionArea(child: body);
 
     return AnimatedSize(
       duration: const Duration(milliseconds: 300),

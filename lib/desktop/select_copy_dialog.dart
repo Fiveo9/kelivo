@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'desktop_selection_area.dart';
 import '../core/models/chat_message.dart';
 import '../l10n/app_localizations.dart';
 import '../icons/lucide_adapter.dart';
@@ -105,7 +106,7 @@ class _SelectCopyDesktopDialog extends StatelessWidget {
                       child: Scrollbar(
                         child: SingleChildScrollView(
                           padding: const EdgeInsets.all(12),
-                          child: SelectionArea(
+                          child: DesktopFloatingSelectionArea(
                             child: Text(
                               message.content,
                               style: TextStyle(fontSize: 15, height: 1.5),
