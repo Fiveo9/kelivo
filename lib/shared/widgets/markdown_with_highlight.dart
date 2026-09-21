@@ -39,6 +39,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_math_fork/flutter_math.dart';
 import '../../core/providers/settings_provider.dart';
 import '../../core/services/workspace/file_link_resolver.dart';
+import '../../desktop/desktop_selection_area.dart';
 import '../../features/workspace/workspace_file_navigation.dart';
 import 'package:Kelivo/desktop/html_preview_dialog.dart';
 import '../cache/byte_lru_cache.dart';
@@ -3635,20 +3636,19 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
       builder: (context, constraints) {
         final bool isDesktopPlatform = _markdownTableTargetPlatformIsDesktop();
         final bool isExporting = ExportCaptureScope.of(context);
-
-        final columnWidth = _compactColumnWidth(
-          constraints.maxWidth.isFinite
-              ? constraints.maxWidth
-              : MediaQuery.sizeOf(context).width,
-          rows.columnCount,
-        );
         final viewportWidth = constraints.maxWidth.isFinite
             ? constraints.maxWidth
             : MediaQuery.sizeOf(context).width;
-        final shouldScrollHorizontally =
-            !isExporting &&
-            rows.columnCount >= 4 &&
-            columnWidth * rows.columnCount > viewportWidth;
+
+        final double columnWidth = isDesktopPlatform
+            ? (viewportWidth / rows.columnCount).clamp(95.0, 360.0).toDouble()
+            : _compactColumnWidth(viewportWidth, rows.columnCount);
+
+        final shouldScrollHorizontally = !isExporting &&
+            (isDesktopPlatform
+                ? (rows.columnCount >= 6 && viewportWidth / rows.columnCount < 95)
+                : (rows.columnCount >= 4 && columnWidth * rows.columnCount > viewportWidth));
+
         final table = _buildTable(
           context,
           borderColor: borderColor,
@@ -3833,13 +3833,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
             ),
       child: DefaultTextStyle.merge(
         style: TextStyle(color: cs.onSurface, fontFamily: appFontFamily),
-        child: Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: (_) {
-            _selectionCoordinator.clearAll();
-          },
-          child: table,
-        ),
+        child: table,
       ),
     );
 
@@ -4142,7 +4136,8 @@ class _MarkdownTableCell extends StatefulWidget {
 }
 
 class _MarkdownTableCellState extends State<_MarkdownTableCell> {
-  int _revision = 0;
+  final GlobalKey<DesktopFloatingSelectionAreaState> _selectionAreaKey =
+      GlobalKey<DesktopFloatingSelectionAreaState>();
 
   @override
   void initState() {
@@ -4167,11 +4162,7 @@ class _MarkdownTableCellState extends State<_MarkdownTableCell> {
   }
 
   void _clear() {
-    if (mounted) {
-      setState(() {
-        _revision++;
-      });
-    }
+    _selectionAreaKey.currentState?.clearSelection();
   }
 
   @override
@@ -4204,17 +4195,12 @@ class _MarkdownTableCellState extends State<_MarkdownTableCell> {
     );
 
     if (widget.selectable) {
-      textWidget = SelectionArea(
-        key: ValueKey('cell_${widget.cellIndex}_$_revision'),
+      textWidget = DesktopFloatingSelectionArea(
+        key: _selectionAreaKey,
         onSelectionChanged: (content) {
           if (content != null && content.plainText.isNotEmpty) {
             widget.coordinator?.onCellSelected(widget.cellIndex);
           }
-        },
-        contextMenuBuilder: (context, selectableRegionState) {
-          return AdaptiveTextSelectionToolbar.selectableRegion(
-            selectableRegionState: selectableRegionState,
-          );
         },
         child: textWidget,
       );

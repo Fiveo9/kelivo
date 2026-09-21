@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show SelectedContent;
 import 'package:flutter/services.dart';
@@ -15,7 +16,8 @@ import '../theme/app_semantic_colors.dart';
 /// On desktop (Windows, macOS, Linux):
 /// - When the user drags to select text with the mouse, a floating "Copy" pill
 ///   appears near the cursor upon release for quick 1-click copying.
-/// - Right-clicking on the selection displays the standard context menu.
+/// - Right-clicking on or near the selection reliably provides the "Copy" option,
+///   even if the platform's point-in-selection test collapses the active range.
 /// - The floating pill automatically dismisses when clicking outside, scrolling,
 ///   or clearing selection.
 ///
@@ -32,20 +34,30 @@ class DesktopFloatingSelectionArea extends StatefulWidget {
 
   @override
   State<DesktopFloatingSelectionArea> createState() =>
-      _DesktopFloatingSelectionAreaState();
+      DesktopFloatingSelectionAreaState();
 }
 
-class _DesktopFloatingSelectionAreaState
+class DesktopFloatingSelectionAreaState
     extends State<DesktopFloatingSelectionArea> {
+  final GlobalKey<SelectableRegionState> _regionKey =
+      GlobalKey<SelectableRegionState>();
   OverlayEntry? _overlayEntry;
   Offset? _lastPointerUpGlobalPosition;
   String? _currentSelectedText;
+  String? _lastSelectedText;
   bool _isPointerDown = false;
 
   bool get _isDesktop =>
       defaultTargetPlatform == TargetPlatform.macOS ||
       defaultTargetPlatform == TargetPlatform.windows ||
       defaultTargetPlatform == TargetPlatform.linux;
+
+  void clearSelection() {
+    _regionKey.currentState?.clearSelection();
+    _dismissOverlay();
+    _currentSelectedText = null;
+    _lastSelectedText = null;
+  }
 
   void _dismissOverlay() {
     _overlayEntry?.remove();
@@ -59,7 +71,11 @@ class _DesktopFloatingSelectionAreaState
   }
 
   void _handleSelectionChanged(SelectedContent? content) {
-    _currentSelectedText = content?.plainText;
+    final text = content?.plainText;
+    _currentSelectedText = text;
+    if (text != null && text.trim().isNotEmpty) {
+      _lastSelectedText = text;
+    }
     widget.onSelectionChanged?.call(content);
 
     if (_currentSelectedText == null ||
@@ -69,18 +85,24 @@ class _DesktopFloatingSelectionAreaState
   }
 
   void _handlePointerDown(PointerDownEvent event) {
+    if (event.buttons == kSecondaryMouseButton) {
+      // Right click: do not treat as selection start, preserve selected text for menu
+      return;
+    }
     _isPointerDown = true;
     _dismissOverlay();
   }
 
   void _handlePointerUp(PointerUpEvent event) {
-    _isPointerDown = false;
-    _lastPointerUpGlobalPosition = event.position;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        _checkAndShowFloatingToolbar();
-      }
-    });
+    if (_isPointerDown) {
+      _isPointerDown = false;
+      _lastPointerUpGlobalPosition = event.position;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _checkAndShowFloatingToolbar();
+        }
+      });
+    }
   }
 
   void _checkAndShowFloatingToolbar() {
@@ -166,7 +188,7 @@ class _DesktopFloatingSelectionAreaState
                     child: InkWell(
                       borderRadius: BorderRadius.circular(20),
                       onTap: () async {
-                        final copyText = _currentSelectedText;
+                        final copyText = _currentSelectedText ?? _lastSelectedText;
                         _dismissOverlay();
                         if (copyText != null && copyText.isNotEmpty) {
                           await Clipboard.setData(
@@ -223,6 +245,48 @@ class _DesktopFloatingSelectionAreaState
     overlay.insert(_overlayEntry!);
   }
 
+  Widget _buildContextMenu(
+    BuildContext context,
+    SelectableRegionState selectableRegionState,
+  ) {
+    final l10n = AppLocalizations.of(context)!;
+    final defaultItems = selectableRegionState.contextMenuButtonItems;
+    final hasCopy =
+        defaultItems.any((item) => item.type == ContextMenuButtonType.copy);
+
+    final textToCopy = (selectableRegionState.hasSelection
+            ? null
+            : _lastSelectedText?.trim()) ??
+        '';
+
+    final items = List<ContextMenuButtonItem>.of(defaultItems);
+    if (!hasCopy && textToCopy.isNotEmpty) {
+      items.insert(
+        0,
+        ContextMenuButtonItem(
+          type: ContextMenuButtonType.copy,
+          label: l10n.shareProviderSheetCopyButton,
+          onPressed: () async {
+            selectableRegionState.hideToolbar();
+            await Clipboard.setData(ClipboardData(text: textToCopy));
+            if (context.mounted) {
+              showAppSnackBar(
+                context,
+                message: l10n.chatMessageWidgetCopiedToClipboard,
+                type: NotificationType.success,
+              );
+            }
+          },
+        ),
+      );
+    }
+
+    return AdaptiveTextSelectionToolbar.buttonItems(
+      anchors: selectableRegionState.contextMenuAnchors,
+      buttonItems: items,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!_isDesktop) {
@@ -244,12 +308,9 @@ class _DesktopFloatingSelectionAreaState
         onPointerDown: _handlePointerDown,
         onPointerUp: _handlePointerUp,
         child: SelectionArea(
+          key: _regionKey,
           onSelectionChanged: _handleSelectionChanged,
-          contextMenuBuilder: (context, selectableRegionState) {
-            return AdaptiveTextSelectionToolbar.selectableRegion(
-              selectableRegionState: selectableRegionState,
-            );
-          },
+          contextMenuBuilder: _buildContextMenu,
           child: widget.child,
         ),
       ),

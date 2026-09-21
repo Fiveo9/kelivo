@@ -75,4 +75,38 @@ void main() {
 
     expect(selected, 'Windows desktop text to copy');
   });
+
+  testWidgets('desktop selection area exposes clearSelection', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final key = GlobalKey<DesktopFloatingSelectionAreaState>();
+    String? selected;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Scaffold(
+          body: DesktopFloatingSelectionArea(
+            key: key,
+            onSelectionChanged: (content) => selected = content?.plainText,
+            child: const Text('Clearable text'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final region = tester.state<SelectableRegionState>(
+      find.byType(SelectableRegion),
+    );
+    region.selectAll(SelectionChangedCause.keyboard);
+    await tester.pumpAndSettle();
+
+    expect(selected, 'Clearable text');
+
+    key.currentState?.clearSelection();
+    await tester.pumpAndSettle();
+
+    expect(region.textEditingValue.selection.isCollapsed, isTrue);
+  });
 }
