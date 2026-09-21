@@ -253,11 +253,7 @@ class DesktopFloatingSelectionAreaState
     final defaultItems = selectableRegionState.contextMenuButtonItems;
     final hasCopy =
         defaultItems.any((item) => item.type == ContextMenuButtonType.copy);
-
-    final textToCopy = (selectableRegionState.hasSelection
-            ? null
-            : _lastSelectedText?.trim()) ??
-        '';
+    final textToCopy = _lastSelectedText?.trim() ?? '';
 
     final items = List<ContextMenuButtonItem>.of(defaultItems);
     if (!hasCopy && textToCopy.isNotEmpty) {
