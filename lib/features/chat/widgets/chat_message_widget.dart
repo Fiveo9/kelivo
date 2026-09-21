@@ -2119,11 +2119,48 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     }
 
     if (isDesktop) {
+      final l10n = AppLocalizations.of(context)!;
       content = DesktopFloatingSelectionArea(
         key: ValueKey('user_${widget.message.id}'),
         onSelectionChanged: (selectedContent) {
           _userSelectedText = selectedContent?.plainText;
         },
+        extraContextMenuItems: (hasSelection) => [
+          DesktopContextMenuItem(
+            icon: hasSelection ? Lucide.ClipboardCheck : Lucide.Copy,
+            label: hasSelection
+                ? l10n.selectCopyPageCopyAll
+                : l10n.shareProviderSheetCopyButton,
+            onTap: () async {
+              if (widget.onCopy != null) {
+                widget.onCopy!.call();
+              } else {
+                await Clipboard.setData(
+                  ClipboardData(text: widget.message.content),
+                );
+                if (mounted) {
+                  showAppSnackBar(
+                    context,
+                    message: l10n.chatMessageWidgetCopiedToClipboard,
+                    type: NotificationType.success,
+                  );
+                }
+              }
+            },
+          ),
+          if (widget.onEdit != null)
+            DesktopContextMenuItem(
+              icon: Lucide.Pencil,
+              label: l10n.messageMoreSheetEdit,
+              onTap: () => widget.onEdit?.call(),
+            ),
+          DesktopContextMenuItem(
+            icon: Lucide.Trash2,
+            label: l10n.messageMoreSheetDelete,
+            danger: true,
+            onTap: () => (widget.onDelete ?? widget.onMore)?.call(),
+          ),
+        ],
         child: content,
       );
     }

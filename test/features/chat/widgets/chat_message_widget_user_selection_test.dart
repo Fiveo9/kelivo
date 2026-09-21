@@ -2,6 +2,7 @@ import "../../../support/business_test_harness.dart";
 import 'package:Kelivo/core/models/chat_message.dart';
 import 'package:Kelivo/core/providers/settings_provider.dart';
 import 'package:Kelivo/core/providers/user_provider.dart';
+import 'package:Kelivo/desktop/desktop_selection_area.dart';
 import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart';
 import 'package:Kelivo/l10n/app_localizations.dart';
 import 'package:Kelivo/shared/widgets/snackbar.dart';
@@ -62,7 +63,8 @@ void main() {
     );
     expect(userSelectionArea, findsOneWidget);
 
-    final areaWidget = tester.widget<SelectionArea>(userSelectionArea);
+    final areaWidget =
+        tester.widget<DesktopFloatingSelectionArea>(userSelectionArea);
     expect(areaWidget.onSelectionChanged, isNotNull);
   });
 }
