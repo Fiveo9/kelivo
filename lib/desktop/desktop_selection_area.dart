@@ -131,7 +131,7 @@ class DesktopFloatingSelectionAreaState
   }
 }
 
-class _SecondaryClickBlockerRecognizer extends GestureRecognizer {
+class _SecondaryClickBlockerRecognizer extends OneSequenceGestureRecognizer {
   _SecondaryClickBlockerRecognizer({super.debugOwner});
 
   ValueChanged<Offset>? onSecondaryClick;
@@ -141,8 +141,6 @@ class _SecondaryClickBlockerRecognizer extends GestureRecognizer {
     if ((event.buttons & kSecondaryMouseButton) != 0) {
       startTrackingPointer(event.pointer, event.transform);
       resolve(GestureDisposition.accepted);
-    } else {
-      stopTrackingPointer(event.pointer);
     }
   }
 
