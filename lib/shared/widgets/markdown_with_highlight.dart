@@ -49,10 +49,20 @@ import 'streaming_code_fence.dart';
 import 'markdown_line_lexer.dart';
 import 'markdown_source_scan.dart';
 import 'selection_region.dart';
+import 'selectable_math.dart';
 
 // Inline math is parsed on the UI thread. Bound the lookahead window so a long
 // line with many unmatched openers cannot trigger repeated whole-line scans.
 const int _maxInlineMathBodyLength = 512;
+
+/// Marks the body of a `\(...\)` that preprocessing produced from `$...$`.
+///
+/// [_replaceInlineDollarMath] normalizes dollar math so the LaTeX renderer can
+/// match it, which would otherwise lose the delimiters the author wrote. The
+/// mark rides inside the matched math, where it is stripped again before the
+/// body reaches the renderer and never enters the paragraph text that a
+/// selection copies.
+const String _dollarMathOriginMark = '\uE003';
 const String _codeDollarMask = '___CODE_DOLLAR_MASK___';
 const String _fencedHtmlTagStartMask = '\uE002';
 
@@ -1852,12 +1862,22 @@ TextStyle _inlineMathTextStyle(TextStyle? style) {
   return base.copyWith(fontSize: baseSize * 1.2);
 }
 
-WidgetSpan _inlineMathSpan(Widget math) {
+/// Wraps rendered inline math in a selectable block so an enclosing
+/// [SelectionArea] can select the formula and copy [source] for it.
+///
+/// [source] is the original `$...$` / `\(...\)` source, delimiters included.
+/// The `SelectionContainer.disabled` scope only covers the scrollable formula
+/// itself: the fallback `Text` of a failed parse must not join the region on
+/// its own.
+WidgetSpan _inlineMathSpan({required String source, required Widget math}) {
   return WidgetSpan(
     alignment: PlaceholderAlignment.baseline,
     baseline: TextBaseline.alphabetic,
-    child: SelectionContainer.disabled(
-      child: _InlineMathScrollable(child: math),
+    child: SelectableLatex(
+      source: source,
+      child: SelectionContainer.disabled(
+        child: _InlineMathScrollable(child: math),
+      ),
     ),
   );
 }
@@ -1888,18 +1908,39 @@ class _InlineMathScrollableState extends State<_InlineMathScrollable> {
   }
 
   void _updateMaxScroll(double childWidth, double viewportWidth) {
-    _maxScroll = (childWidth - viewportWidth).clamp(0.0, double.infinity);
-    // Ensure current offset stays valid after relayout.
-    if (_scrollOffset > _maxScroll) {
+    final double next = (childWidth - viewportWidth).clamp(
+      0.0,
+      double.infinity,
+    );
+    final bool overflowsChanged = (next > 0) != (_maxScroll > 0);
+    _maxScroll = next;
+    // Ensure current offset stays valid after relayout. The render object
+    // paints from this state value, so a clamp has to rebuild as well.
+    final bool clamped = _scrollOffset > _maxScroll;
+    if (clamped) {
       _scrollOffset = _maxScroll;
+    }
+    if ((overflowsChanged || clamped) && mounted) {
+      // The render object reports metrics during layout, so the rebuild that
+      // decides whether a drag scrolls or selects has to wait for the frame to
+      // finish; calling setState here would assert.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {});
+        }
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Dragging a formula competes with the surrounding selection region. Only
+    // a formula that actually overflows offers the scroll gesture; otherwise
+    // the region wins and a drag across the formula starts a selection.
+    final bool overflows = _maxScroll > 0;
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onHorizontalDragUpdate: _onHorizontalDragUpdate,
+      onHorizontalDragUpdate: overflows ? _onHorizontalDragUpdate : null,
       child: _InlineMathScrollableRenderWidget(
         scrollOffset: _scrollOffset,
         onMetrics: _updateMaxScroll,
@@ -1964,10 +2005,10 @@ class _RenderInlineMathScrollable extends RenderProxyBox {
       parentUsesSize: true,
     );
     size = constraints.constrain(child.size);
-    // Notify stateful widget of the scrollable extent.
-    if (child.size.width > size.width) {
-      onMetrics(child.size.width, size.width);
-    }
+    // Report on every layout, not only while the formula overflows: clearing
+    // overflow has to reach the state too, otherwise the drag gesture would
+    // stay enabled and keep winning the arena over the selection region.
+    onMetrics(child.size.width, size.width);
   }
 
   @override
@@ -2021,6 +2062,7 @@ String _replaceInlineDollarMath(String input) {
         final body = input.substring(i + 1, close);
         buf
           ..write(r'\(')
+          ..write(_dollarMathOriginMark)
           ..write(body)
           ..write(r'\)');
         i = close + 1;
@@ -2525,6 +2567,22 @@ int _findMatchingOpenBracket(String tex, int close) {
 
 String _stripFormatChars(String input) {
   return input.replaceAll(RegExp(r'[\u200B\u200C\u200D\uFEFF]'), '');
+}
+
+/// Restores the `$...$` delimiters that [_replaceInlineDollarMath] normalized
+/// into `\(...\)`.
+///
+/// The mark exists for the renderer only; text that leaves the app, such as a
+/// table's copy and export actions, has to hand back what the author wrote
+/// instead of the normalized delimiters or the mark itself.
+String _restoreDollarMathSource(String input) {
+  if (!input.contains(_dollarMathOriginMark)) {
+    return input;
+  }
+  return input.replaceAllMapped(
+    RegExp(r'\\\(' + _dollarMathOriginMark + r'([^\n]*?)\\\)'),
+    (match) => '\$${match.group(1)}\$',
+  );
 }
 
 String _softBreakLongTableTokens(String input) {
@@ -4203,14 +4261,16 @@ class _MarkdownTableCell extends StatelessWidget {
   }
 
   String _softBreakTableCellText(String input) {
-    // Keep markdown links intact. Inserting ZWSP into `[label](kelivo://…)`
-    // (long snake_case names are one token because `_` is not a wrap point)
-    // corrupts the scheme so KelivoLink.tryParse fails and launchUrl opens
-    // the system browser.
-    final link = RegExp(r'\[[^\]]*\]\([^)]*\)');
+    // Keep markdown links and inline math intact. Inserting ZWSP into
+    // `[label](kelivo://…)` (long snake_case names are one token because `_` is
+    // not a wrap point) corrupts the scheme so KelivoLink.tryParse fails and
+    // launchUrl opens the system browser. A formula is one widget span that
+    // cannot wrap, so breaking its source would only feed the renderer and a
+    // copy stray characters.
+    final protected = RegExp(r'\[[^\]]*\]\([^)]*\)|\\\([^\n]*?\\\)');
     final buffer = StringBuffer();
     var start = 0;
-    for (final match in link.allMatches(input)) {
+    for (final match in protected.allMatches(input)) {
       buffer.write(
         _softBreakLongTableTokens(input.substring(start, match.start)),
       );
@@ -4381,13 +4441,33 @@ class _MarkdownTableData {
   }
 
   String toCsv() => _rowsToCsv(
-    rows.map((row) => row.cells.map((c) => c.text).toList()).toList(),
+    rows
+        .map(
+          (row) => row.cells
+              .map((c) => _exportCellText(c.text))
+              .toList(growable: false),
+        )
+        .toList(growable: false),
   );
 
   String toMarkdown() => _rowsToMarkdown(
-    rows.map((row) => row.cells.map((c) => c.text).toList()).toList(),
+    rows
+        .map(
+          (row) => row.cells
+              .map((c) => _exportCellText(c.text))
+              .toList(growable: false),
+        )
+        .toList(growable: false),
   );
 }
+
+/// Cell text as it leaves the app through copy or export: dollar math back to
+/// the delimiters the author wrote, inline-code dollars unmasked, and
+/// layout-only format characters (soft breaks inserted for narrow cells)
+/// removed.
+String _exportCellText(String input) => _stripFormatChars(
+  _restoreDollarMathSource(input).replaceAll(_codeDollarMask, r'$'),
+);
 
 class _MarkdownTableRowData {
   const _MarkdownTableRowData(this.cells);
@@ -5435,47 +5515,30 @@ class LatexBlockScrollableMd extends BlockMd {
     if (body.isEmpty) return const SizedBox.shrink();
 
     final math = _renderMath(body, style: config.style, displayMode: true);
+    // The region copies this block's original source, `$$...$$` or `\[...\]`,
+    // so a pasted formula keeps its delimiters and still renders.
+    final source = text.trim();
     // Wrap in horizontal scroll to avoid overflow and center within available width
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          return SelectionContainer.disabled(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              primary: false,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minWidth: constraints.maxWidth),
-                child: Center(child: math),
+          return SelectableLatex(
+            source: source,
+            child: SelectionContainer.disabled(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                primary: false,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minWidth: constraints.maxWidth),
+                  child: Center(child: math),
+                ),
               ),
             ),
           );
         },
       ),
     );
-  }
-}
-
-/// Inline LaTeX `$...$` rendered in the text flow.
-class InlineLatexScrollableMd extends InlineMd {
-  @override
-  // Match single-dollar $...$ or \(...\) inline math (avoid $$ block)
-  RegExp get exp => RegExp(
-    r"(?:(?<!\$)\$([^\$\n]{1,"
-    "$_maxInlineMathBodyLength"
-    r"})\$(?!\$)|\\\(([^\n]{1,"
-    "$_maxInlineMathBodyLength"
-    r"}?)\\\))",
-  );
-
-  @override
-  InlineSpan span(BuildContext context, String text, GptMarkdownConfig config) {
-    final m = exp.firstMatch(text);
-    if (m == null) return TextSpan(text: text, style: config.style);
-    final body = ((m.group(1) ?? m.group(2) ?? '')).trim();
-    if (body.isEmpty) return TextSpan(text: text, style: config.style);
-    final math = _renderMath(body, style: _inlineMathTextStyle(config.style));
-    return _inlineMathSpan(math);
   }
 }
 
@@ -5499,11 +5562,12 @@ class InlineLatexDollarScrollableMd extends InlineMd {
       return TextSpan(text: text, style: config.style);
     }
     final math = _renderMath(body, style: _inlineMathTextStyle(config.style));
+    final source = '\$${m.group(2) ?? ''}\$';
     return TextSpan(
       style: config.style,
       children: [
         if (prefix.isNotEmpty) TextSpan(text: prefix, style: config.style),
-        _inlineMathSpan(math),
+        _inlineMathSpan(source: source, math: math),
       ],
     );
   }
@@ -5514,7 +5578,7 @@ class InlineLatexParenScrollableMd extends InlineMd {
   @override
   RegExp get exp => RegExp(
     r"(?:\\\(([^\n]{1,"
-    "$_maxInlineMathBodyLength"
+    "${_maxInlineMathBodyLength + 1}"
     r"}?)\\\))",
   );
 
@@ -5522,10 +5586,20 @@ class InlineLatexParenScrollableMd extends InlineMd {
   InlineSpan span(BuildContext context, String text, GptMarkdownConfig config) {
     final m = exp.firstMatch(text);
     if (m == null) return TextSpan(text: text, style: config.style);
-    final body = (m.group(1) ?? '').trim();
+    final raw = m.group(1) ?? '';
+    // `$...$` is normalized to `\(...\)` before rendering; the mark restores
+    // the delimiters the author wrote so a copy keeps them.
+    final bool fromDollarMath = raw.startsWith(_dollarMathOriginMark);
+    final String authored = fromDollarMath
+        ? raw.substring(_dollarMathOriginMark.length)
+        : raw;
+    final body = authored.trim();
     if (body.isEmpty) return TextSpan(text: text, style: config.style);
     final math = _renderMath(body, style: _inlineMathTextStyle(config.style));
-    return _inlineMathSpan(math);
+    return _inlineMathSpan(
+      source: fromDollarMath ? '\$$authored\$' : '\\($authored\\)',
+      math: math,
+    );
   }
 }
 
