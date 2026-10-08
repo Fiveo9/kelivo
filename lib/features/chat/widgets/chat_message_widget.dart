@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart'
 import 'dart:ui' as ui;
 import 'dart:math' as math;
 import 'package:flutter/services.dart';
-import 'package:flutter/rendering.dart' show RenderParagraph, RenderObject;
+import 'package:flutter/gestures.dart';
 import '../../../core/services/haptics.dart';
 import '../../../shared/widgets/optional_shader_mask.dart';
 import 'package:provider/provider.dart';
@@ -1017,6 +1017,43 @@ class _ToolDetailBody extends StatelessWidget {
   }
 }
 
+bool get _isDesktopPlatform =>
+    defaultTargetPlatform == TargetPlatform.macOS ||
+    defaultTargetPlatform == TargetPlatform.windows ||
+    defaultTargetPlatform == TargetPlatform.linux;
+
+/// Owns right-clicks on a message bubble.
+///
+/// The selection region inside the bubble also listens for secondary taps and
+/// would win the gesture arena first: it collapses the selection for clicks
+/// outside it and shows its own toolbar. Accepting the pointer here instead
+/// keeps the selection alive while the bubble's own menu is open.
+class _SecondaryClickBlocker extends OneSequenceGestureRecognizer {
+  ValueChanged<Offset>? onSecondaryTapDown;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (!_isDesktopPlatform) return;
+    if ((event.buttons & kSecondaryMouseButton) == 0) return;
+    startTrackingPointer(event.pointer, event.transform);
+    resolve(GestureDisposition.accepted);
+    onSecondaryTapDown?.call(event.position);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      stopTrackingPointer(event.pointer);
+    }
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {}
+
+  @override
+  String get debugDescription => 'SecondaryClickBlocker';
+}
+
 class ChatMessageWidget extends StatefulWidget {
   final ChatMessage message;
   final Widget? modelIcon;
@@ -1141,6 +1178,10 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   bool _inlineThinkManuallyToggled = false;
   // User message context menu state
   final GlobalKey _userBubbleKey = GlobalKey();
+  // Anchor for the bubble's selection region, so the right-click menu can ask
+  // the region whether it still holds a selection.
+  final GlobalKey<SelectionAreaState> _userSelectionKey =
+      GlobalKey<SelectionAreaState>();
   OverlayEntry? _userMenuOverlay;
   // Live selection text of the bubble's desktop selection region, kept for the
   // right-click menu. The region clears its selection as soon as the menu route
@@ -1830,38 +1871,41 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
           ),
           const SizedBox(height: 8),
           // Message content (context menu: long-press on mobile, right-click on desktop)
-          GestureDetector(
-            onLongPressStart: (_) {
-              final isDesktop =
-                  defaultTargetPlatform == TargetPlatform.macOS ||
-                  defaultTargetPlatform == TargetPlatform.windows ||
-                  defaultTargetPlatform == TargetPlatform.linux;
-              if (isDesktop) return; // Desktop uses right-click menu
-              _showUserContextMenu();
+          RawGestureDetector(
+            gestures: <Type, GestureRecognizerFactory>{
+              _SecondaryClickBlocker:
+                  GestureRecognizerFactoryWithHandlers<_SecondaryClickBlocker>(
+                    _SecondaryClickBlocker.new,
+                    (_SecondaryClickBlocker instance) {
+                      instance.onSecondaryTapDown = _handleSecondaryTapDown;
+                    },
+                  ),
             },
-            onSecondaryTapDown: (details) {
-              final isDesktop =
-                  defaultTargetPlatform == TargetPlatform.macOS ||
-                  defaultTargetPlatform == TargetPlatform.windows ||
-                  defaultTargetPlatform == TargetPlatform.linux;
-              if (!isDesktop) return; // Mobile keeps long-press
-              _showUserContextMenuAt(details.globalPosition);
-            },
-            behavior: HitTestBehavior.translucent,
-            child: Container(
-              key: _userBubbleKey,
-              constraints: BoxConstraints(
-                maxWidth: MediaQuery.sizeOf(context).width * 0.75,
-              ),
-              child: Column(
-                key: ValueKey('user-message-content:${widget.message.id}'),
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (mediaPreview != null) mediaPreview,
-                  if (mediaPreview != null && textBubble != null)
-                    const SizedBox(height: 8),
-                  if (textBubble != null) textBubble,
-                ],
+            child: GestureDetector(
+              onLongPressStart: (_) {
+                final isDesktop =
+                    defaultTargetPlatform == TargetPlatform.macOS ||
+                    defaultTargetPlatform == TargetPlatform.windows ||
+                    defaultTargetPlatform == TargetPlatform.linux;
+                if (isDesktop) return; // Desktop uses right-click menu
+                _showUserContextMenu();
+              },
+              behavior: HitTestBehavior.translucent,
+              child: Container(
+                key: _userBubbleKey,
+                constraints: BoxConstraints(
+                  maxWidth: MediaQuery.sizeOf(context).width * 0.75,
+                ),
+                child: Column(
+                  key: ValueKey('user-message-content:${widget.message.id}'),
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    if (mediaPreview != null) mediaPreview,
+                    if (mediaPreview != null && textBubble != null)
+                      const SizedBox(height: 8),
+                    if (textBubble != null) textBubble,
+                  ],
+                ),
               ),
             ),
           ),
@@ -2004,12 +2048,13 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     try {
       Haptics.light();
     } catch (_) {}
-    // Only offer the selection when the click landed on it: a right-click
-    // outside collapses the region's selection, and this menu is built while
-    // both outcomes are still racing inside the same gesture.
-    final String? selectedText =
-        _selectionUnderBubble(globalPosition) ? _userSelectionText : null;
-    final bool hasSelection = selectedText != null && selectedText.isNotEmpty;
+    // The region only offers "Copy" while it holds a non-collapsed selection.
+    // The bubble blocks secondary clicks before the region sees them, so the
+    // highlight stays up while this menu is open and the item is accurate.
+    final String messageSelection = _userSelectionIsCopyable()
+        ? _userSelectionText ?? ''
+        : '';
+    final bool hasSelection = messageSelection.isNotEmpty;
     await showDesktopContextMenuAt(
       context,
       globalPosition: globalPosition,
@@ -2019,7 +2064,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
             icon: Lucide.ClipboardCheck,
             label: l10n.shareProviderSheetCopyButton,
             onTap: () async {
-              await Clipboard.setData(ClipboardData(text: selectedText!));
+              await Clipboard.setData(ClipboardData(text: messageSelection));
               if (mounted) {
                 showAppSnackBar(
                   context,
@@ -2067,38 +2112,23 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     );
   }
 
-  /// Whether [globalPosition] sits on the bubble's current text selection.
-  ///
-  /// A right-click inside the selection keeps it while a right-click outside
-  /// collapses it, and both resolve inside the same gesture. Probing the render
-  /// tree keeps the menu independent of which recognizer runs first.
-  bool _selectionUnderBubble(Offset globalPosition) {
-    final BuildContext? bubbleContext = _userBubbleKey.currentContext;
-    if (bubbleContext == null) return false;
-    final RenderObject? root = bubbleContext.findRenderObject();
-    if (root == null) return false;
-    bool hit = false;
-    void visit(RenderObject node) {
-      if (hit) return;
-      if (node is RenderParagraph) {
-        final Offset local = node.globalToLocal(globalPosition);
-        for (final TextSelection selection in node.selections) {
-          // A collapsed caret sits where the user clicked, which would make
-          // every right-click look like it landed on a selection.
-          if (selection.isCollapsed) continue;
-          for (final TextBox box in node.getBoxesForSelection(selection)) {
-            if (box.toRect().inflate(1).contains(local)) {
-              hit = true;
-              return;
-            }
-          }
-        }
-      }
-      node.visitChildren(visit);
-    }
+  void _handleSecondaryTapDown(Offset globalPosition) {
+    if (!_isDesktopPlatform) return; // Mobile keeps the long-press menu
+    _showUserContextMenuAt(globalPosition);
+  }
 
-    root.visitChildren(visit);
-    return hit;
+  /// Whether the bubble's region currently offers "Copy".
+  ///
+  /// The framework only includes that button while the region holds a
+  /// non-collapsed selection, so this is the public way to ask whether a
+  /// selection is still alive.
+  bool _userSelectionIsCopyable() {
+    final SelectableRegionState? region =
+        _userSelectionKey.currentState?.selectableRegion;
+    if (region == null) return false;
+    return region.contextMenuButtonItems.any(
+      (item) => item.type == ContextMenuButtonType.copy,
+    );
   }
 
   void _setAnchorFromKey(GlobalKey key) {
@@ -2150,7 +2180,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
 
     if (isDesktop) {
       content = SelectionArea(
-        key: ValueKey('user_${widget.message.id}'),
+        key: _userSelectionKey,
         onSelectionChanged: (selection) =>
             _userSelectionText = selection?.plainText,
         // The bubble's own context menu owns right-click and offers the

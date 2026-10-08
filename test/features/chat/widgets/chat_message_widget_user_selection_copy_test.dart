@@ -7,6 +7,7 @@ import 'package:Kelivo/features/chat/widgets/chat_message_widget.dart';
 import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
 import 'package:Kelivo/features/home/services/tool_approval_service.dart';
 import 'package:Kelivo/l10n/app_localizations.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -20,61 +21,74 @@ const _messageText = 'alpha bravo charlie';
 const _wordSelection = TextSelection(baseOffset: 6, extentOffset: 11);
 
 void main() {
-  testWidgets('right-click on a selection offers the selected text', (
-    tester,
-  ) async {
-    final copied = <String>[];
-    _mockClipboard(copied);
-    await _pumpUserBubble(tester);
-    final paragraph = _paragraphContaining(_messageText);
-    await _selectWord(tester, paragraph);
-    await _rightClickAt(tester, paragraph, _wordSelection);
+  testWidgets(
+    'right-click on a selection offers the selected text',
+    (tester) async {
+      final copied = <String>[];
+      _mockClipboard(copied);
+      await _pumpUserBubble(tester);
+      final l10n = _l10n(tester);
+      final paragraph = _paragraphContaining(_messageText);
+      await _selectWord(tester, paragraph);
+      await _rightClickAt(tester, paragraph, _wordSelection);
 
-    expect(find.text('Copy'), findsOneWidget);
-    expect(find.text('Copy All'), findsOneWidget);
+      expect(find.text(l10n.shareProviderSheetCopyButton), findsOneWidget);
+      expect(find.text(l10n.selectCopyPageCopyAll), findsOneWidget);
 
-    await tester.tap(find.text('Copy'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text(l10n.shareProviderSheetCopyButton));
+      await tester.pumpAndSettle();
 
-    expect(copied, ['bravo']);
-  }, variant: TargetPlatformVariant.desktop());
+      expect(copied, ['bravo']);
+      // Let the copy snackbar's auto-dismiss timer finish.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant.desktop(),
+  );
 
-  testWidgets('right-click away from the selection copies the whole message', (
-    tester,
-  ) async {
-    final copied = <String>[];
-    _mockClipboard(copied);
-    await _pumpUserBubble(tester);
-    final paragraph = _paragraphContaining(_messageText);
-    await _selectWord(tester, paragraph);
-    // The first letter sits outside the selected word, so the region collapses
-    // the selection instead of keeping it.
-    await _rightClickAt(
-      tester,
-      paragraph,
-      const TextSelection(baseOffset: 0, extentOffset: 1),
-    );
+  testWidgets(
+    'right-click without a selection copies the whole message',
+    (tester) async {
+      final copied = <String>[];
+      _mockClipboard(copied);
+      await _pumpUserBubble(tester);
+      final l10n = _l10n(tester);
+      final paragraph = _paragraphContaining(_messageText);
+      // The bubble owns right-clicks, so the region keeps whatever selection it
+      // holds: with none, the menu only offers the whole message.
+      await _rightClickAt(
+        tester,
+        paragraph,
+        const TextSelection(baseOffset: 0, extentOffset: 1),
+      );
 
-    expect(find.text('Copy'), findsOneWidget);
-    expect(find.text('Copy All'), findsNothing);
+      expect(find.text(l10n.shareProviderSheetCopyButton), findsOneWidget);
+      expect(find.text(l10n.selectCopyPageCopyAll), findsNothing);
 
-    await tester.tap(find.text('Copy'));
-    await tester.pumpAndSettle();
+      await tester.tap(find.text(l10n.shareProviderSheetCopyButton));
+      await tester.pumpAndSettle();
 
-    expect(copied, [_messageText]);
-  }, variant: TargetPlatformVariant.desktop());
+      expect(copied, [_messageText]);
+      // Let the copy snackbar's auto-dismiss timer finish.
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pumpAndSettle();
+    },
+    variant: TargetPlatformVariant.desktop(),
+  );
 
-  testWidgets('keyboard copy copies the selected word of a user bubble', (
-    tester,
-  ) async {
-    final copied = <String>[];
-    _mockClipboard(copied);
-    await _pumpUserBubble(tester);
-    await _selectWord(tester, _paragraphContaining(_messageText));
-    await _copySelection(tester);
+  testWidgets(
+    'keyboard copy copies the selected word of a user bubble',
+    (tester) async {
+      final copied = <String>[];
+      _mockClipboard(copied);
+      await _pumpUserBubble(tester);
+      await _selectWord(tester, _paragraphContaining(_messageText));
+      await _copySelection(tester);
 
-    expect(copied, ['bravo']);
-  }, variant: TargetPlatformVariant.desktop());
+      expect(copied, ['bravo']);
+    },
+    variant: TargetPlatformVariant.desktop(),
+  );
 }
 
 Future<void> _pumpUserBubble(WidgetTester tester) async {
@@ -123,6 +137,12 @@ Future<void> _pumpUserBubble(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// The menu labels come from the app localizations, so the assertions do not
+/// depend on the locale the test binding happens to run under.
+AppLocalizations _l10n(WidgetTester tester) {
+  return AppLocalizations.of(tester.element(find.byType(ChatMessageWidget)))!;
+}
+
 void _mockClipboard(List<String> copied) {
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -148,10 +168,7 @@ Future<void> _copySelection(WidgetTester tester) async {
 }
 
 /// Double-clicks the word at [selection] inside [paragraph].
-Future<void> _selectWord(
-  WidgetTester tester,
-  RenderParagraph paragraph,
-) async {
+Future<void> _selectWord(WidgetTester tester, RenderParagraph paragraph) async {
   final target = _centerOf(paragraph, _wordSelection);
   final mouse = await tester.startGesture(
     target,

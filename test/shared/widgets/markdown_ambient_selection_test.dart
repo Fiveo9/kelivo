@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 import 'package:Kelivo/core/providers/settings_provider.dart';
 import 'package:Kelivo/l10n/app_localizations.dart';
 import 'package:Kelivo/shared/widgets/markdown_with_highlight.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -11,15 +12,17 @@ import 'package:provider/provider.dart';
 
 import '../../support/business_test_harness.dart';
 
-/// A paragraph, a fenced code block and another paragraph. Code blocks and
-/// table cells used to open their own selection region, which cut drag
-/// selection and keyboard copy off at the block boundary.
+/// A paragraph, a fenced code block and another paragraph. The code block used
+/// to open its own selection region, which cut drag selection and keyboard copy
+/// off at the block boundary.
 const _mixedText =
     'intro paragraph\n\n'
     '```dart\n'
     'final value = 1;\n'
     '```\n\n'
     'outro paragraph';
+
+const _tableText = '| Name | Value |\n| - | - |\n| Alpha | 42 |';
 
 void main() {
   testWidgets('code blocks join the surrounding selection region', (
@@ -86,40 +89,6 @@ void main() {
     expect(selected, contains('final value199 = 199;'));
   });
 
-  testWidgets('desktop tables join the surrounding selection region', (
-    tester,
-  ) async {
-    markdownTableTargetPlatformOverride = TargetPlatform.windows;
-    addTearDown(() => markdownTableTargetPlatformOverride = null);
-    String? selected;
-    await tester.pumpWidget(
-      _harness(
-        SelectionArea(
-          onSelectionChanged: (content) => selected = content?.plainText,
-          child: const Align(
-            alignment: Alignment.topLeft,
-            child: MarkdownWithCodeHighlight(
-              text: '| Name | Value |\n| - | - |\n| Alpha | 42 |',
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(Table), findsOneWidget);
-    expect(find.byType(SelectableText), findsNothing);
-
-    final region = tester.state<SelectableRegionState>(
-      find.byType(SelectableRegion),
-    );
-    region.selectAll();
-    await tester.pumpAndSettle();
-
-    expect(selected, contains('Alpha'));
-    expect(selected, contains('42'));
-  });
-
   testWidgets('dragging across a code block selects it and both paragraphs', (
     tester,
   ) async {
@@ -137,11 +106,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await _dragAcross(
-      tester,
-      _paragraphContaining('intro paragraph'),
-      _paragraphContaining('outro paragraph'),
-    );
+    await _dragAcrossDocument(tester);
     await tester.pumpAndSettle();
 
     expect(selected, contains('intro paragraph'));
@@ -149,36 +114,67 @@ void main() {
     expect(selected, contains('outro paragraph'));
   });
 
-  testWidgets('keyboard copy keeps a selection that spans a code block', (
+  testWidgets('desktop tables join the surrounding selection region', (
     tester,
   ) async {
-    final copied = <String>[];
-    _mockClipboard(copied);
+    markdownTableTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => markdownTableTargetPlatformOverride = null);
+    String? selected;
     await tester.pumpWidget(
       _harness(
-        const Align(
-          alignment: Alignment.topLeft,
-          child: SelectionArea(
-            child: MarkdownWithCodeHighlight(text: _mixedText),
+        SelectionArea(
+          onSelectionChanged: (content) => selected = content?.plainText,
+          child: const Align(
+            alignment: Alignment.topLeft,
+            child: MarkdownWithCodeHighlight(text: _tableText),
           ),
         ),
       ),
     );
     await tester.pumpAndSettle();
 
-    await _dragAcross(
+    expect(find.byType(Table), findsOneWidget);
+    expect(find.byType(SelectableText), findsNothing);
+
+    await _dragBetween(
       tester,
-      _paragraphContaining('intro paragraph'),
-      _paragraphContaining('outro paragraph'),
+      _paragraphContaining('Alpha'),
+      _paragraphContaining('42'),
     );
     await tester.pumpAndSettle();
-    await _copySelection(tester);
 
-    expect(copied, hasLength(1));
-    expect(copied.single, contains('intro paragraph'));
-    expect(copied.single, contains('final value = 1;'));
-    expect(copied.single, contains('outro paragraph'));
-  }, variant: TargetPlatformVariant.desktop());
+    expect(selected, contains('Alpha'));
+    expect(selected, contains('42'));
+  });
+
+  testWidgets(
+    'keyboard copy keeps a selection that spans a code block',
+    (tester) async {
+      final copied = <String>[];
+      _mockClipboard(copied);
+      await tester.pumpWidget(
+        _harness(
+          const Align(
+            alignment: Alignment.topLeft,
+            child: SelectionArea(
+              child: MarkdownWithCodeHighlight(text: _mixedText),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _dragAcrossDocument(tester);
+      await tester.pumpAndSettle();
+      await _copySelection(tester);
+
+      expect(copied, hasLength(1));
+      expect(copied.single, contains('intro paragraph'));
+      expect(copied.single, contains('final value = 1;'));
+      expect(copied.single, contains('outro paragraph'));
+    },
+    variant: TargetPlatformVariant.desktop(),
+  );
 }
 
 Widget _harness(Widget child) {
@@ -216,14 +212,33 @@ Future<void> _copySelection(WidgetTester tester) async {
   await tester.pump();
 }
 
-/// Drags from the start of one paragraph to the end of another.
-Future<void> _dragAcross(
+/// Drags from the first line of the document paragraph to its last line. Block
+/// widgets such as code blocks are embedded in that paragraph as widget spans,
+/// so this is the gesture a reader makes across one.
+Future<void> _dragAcrossDocument(WidgetTester tester) async {
+  final paragraph = _documentParagraph();
+  await _drag(
+    tester,
+    paragraph.localToGlobal(const Offset(1, 8)),
+    paragraph.localToGlobal(
+      Offset(paragraph.size.width - 1, paragraph.size.height - 8),
+    ),
+  );
+}
+
+Future<void> _dragBetween(
   WidgetTester tester,
-  RenderParagraph first,
-  RenderParagraph last,
+  RenderParagraph from,
+  RenderParagraph to,
 ) async {
-  final start = first.localToGlobal(const Offset(1, 8));
-  final end = last.localToGlobal(Offset(last.size.width - 1, 8));
+  await _drag(
+    tester,
+    from.localToGlobal(const Offset(1, 9)),
+    to.localToGlobal(Offset(to.size.width - 1, 9)),
+  );
+}
+
+Future<void> _drag(WidgetTester tester, Offset start, Offset end) async {
   final gesture = await tester.startGesture(
     start,
     kind: ui.PointerDeviceKind.mouse,
@@ -233,6 +248,17 @@ Future<void> _dragAcross(
   await tester.pump();
   await gesture.up();
   await gesture.removePointer();
+}
+
+/// The paragraph the markdown document itself renders into: tables, code and
+/// other block widgets are embedded in it, so it is the tallest one on screen.
+RenderParagraph _documentParagraph() {
+  return find
+      .byType(RichText)
+      .evaluate()
+      .map((element) => element.renderObject)
+      .whereType<RenderParagraph>()
+      .reduce((a, b) => a.size.height >= b.size.height ? a : b);
 }
 
 RenderParagraph _paragraphContaining(String text) {

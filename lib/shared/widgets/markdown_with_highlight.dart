@@ -4188,8 +4188,11 @@ class _MarkdownTableCell extends StatelessWidget {
   /// layout keeps the cursor room [SelectableText] would have reserved, so its
   /// wrapping and width do not change.
   Widget _cellTextInRegion(TextSpan textSpan) {
-    final Widget text = RichText(
-      text: textSpan,
+    final Widget text = Text.rich(
+      textSpan,
+      // Keep the cell's own style on the widget too, so the paragraph's root
+      // span carries the cell color instead of the surrounding default.
+      style: textSpan.style,
       textAlign: data.alignment,
       softWrap: true,
       overflow: TextOverflow.visible,
@@ -6653,10 +6656,7 @@ class _SelectableHighlightViewState extends State<SelectableHighlightView> {
     final Widget text = widget.source.length > 2048
         ? StreamingRichText(text: Text.rich(span))
         : Text.rich(span);
-    return Padding(
-      padding: const EdgeInsets.only(right: 3),
-      child: text,
-    );
+    return Padding(padding: const EdgeInsets.only(right: 3), child: text);
   }
 
   Widget _buildChunkSelectionContextMenu(
