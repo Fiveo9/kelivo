@@ -75,7 +75,18 @@ Future<double> _bubbleWidth(
         .width;
   }
   await tester.pumpAndSettle();
-  return tester.getSize(find.byKey(ValueKey('assistant_${message.id}'))).width;
+  return tester.getSize(_assistantRegion(message.id)).width;
+}
+
+/// The assistant text selection region. Its key ends with the timeline block
+/// and paragraph ordinal, so match the message prefix instead of the full key.
+Finder _assistantRegion(String messageId) {
+  return find.byWidgetPredicate((widget) {
+    final Key? key = widget.key;
+    return widget is SelectionArea &&
+        key is ValueKey<String> &&
+        key.value.startsWith('assistant_$messageId');
+  });
 }
 
 void main() {
@@ -113,9 +124,7 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          final content = find.byKey(
-            const ValueKey('assistant_streaming-fit-content'),
-          );
+          final content = _assistantRegion('streaming-fit-content');
           final completedSize = tester.getSize(content);
           void expectCompletedSize() {
             final size = tester.getSize(content);

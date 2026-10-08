@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart'
 import 'dart:ui' as ui;
 import 'dart:math' as math;
 import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph, RenderObject;
 import '../../../core/services/haptics.dart';
 import '../../../shared/widgets/optional_shader_mask.dart';
 import 'package:provider/provider.dart';
@@ -1141,6 +1142,10 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   // User message context menu state
   final GlobalKey _userBubbleKey = GlobalKey();
   OverlayEntry? _userMenuOverlay;
+  // Live selection text of the bubble's desktop selection region, kept for the
+  // right-click menu. The region clears its selection as soon as the menu route
+  // takes focus, so the text has to be captured before that happens.
+  String? _userSelectionText;
   // Desktop anchored menus for bottom action buttons
   final GlobalKey _moreBtnKey1 = GlobalKey();
   final GlobalKey _moreBtnKey2 = GlobalKey();
@@ -1188,6 +1193,9 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   @override
   void didUpdateWidget(covariant ChatMessageWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.message.id != widget.message.id) {
+      _userSelectionText = null;
+    }
     _syncTicker();
     // Auto-collapse when inline <think> transitions from loading -> finished
     _applyAutoCollapseInlineThinkIfFinished(oldWidget: oldWidget);
@@ -1996,13 +2004,36 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     try {
       Haptics.light();
     } catch (_) {}
+    // Only offer the selection when the click landed on it: a right-click
+    // outside collapses the region's selection, and this menu is built while
+    // both outcomes are still racing inside the same gesture.
+    final String? selectedText =
+        _selectionUnderBubble(globalPosition) ? _userSelectionText : null;
+    final bool hasSelection = selectedText != null && selectedText.isNotEmpty;
     await showDesktopContextMenuAt(
       context,
       globalPosition: globalPosition,
       items: [
+        if (hasSelection)
+          DesktopContextMenuItem(
+            icon: Lucide.ClipboardCheck,
+            label: l10n.shareProviderSheetCopyButton,
+            onTap: () async {
+              await Clipboard.setData(ClipboardData(text: selectedText!));
+              if (mounted) {
+                showAppSnackBar(
+                  context,
+                  message: l10n.chatMessageWidgetCopiedToClipboard,
+                  type: NotificationType.success,
+                );
+              }
+            },
+          ),
         DesktopContextMenuItem(
           icon: Lucide.Copy,
-          label: l10n.shareProviderSheetCopyButton,
+          label: hasSelection
+              ? l10n.selectCopyPageCopyAll
+              : l10n.shareProviderSheetCopyButton,
           onTap: () async {
             if (widget.onCopy != null) {
               widget.onCopy!.call();
@@ -2034,6 +2065,40 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
         ),
       ],
     );
+  }
+
+  /// Whether [globalPosition] sits on the bubble's current text selection.
+  ///
+  /// A right-click inside the selection keeps it while a right-click outside
+  /// collapses it, and both resolve inside the same gesture. Probing the render
+  /// tree keeps the menu independent of which recognizer runs first.
+  bool _selectionUnderBubble(Offset globalPosition) {
+    final BuildContext? bubbleContext = _userBubbleKey.currentContext;
+    if (bubbleContext == null) return false;
+    final RenderObject? root = bubbleContext.findRenderObject();
+    if (root == null) return false;
+    bool hit = false;
+    void visit(RenderObject node) {
+      if (hit) return;
+      if (node is RenderParagraph) {
+        final Offset local = node.globalToLocal(globalPosition);
+        for (final TextSelection selection in node.selections) {
+          // A collapsed caret sits where the user clicked, which would make
+          // every right-click look like it landed on a selection.
+          if (selection.isCollapsed) continue;
+          for (final TextBox box in node.getBoxesForSelection(selection)) {
+            if (box.toRect().inflate(1).contains(local)) {
+              hit = true;
+              return;
+            }
+          }
+        }
+      }
+      node.visitChildren(visit);
+    }
+
+    root.visitChildren(visit);
+    return hit;
   }
 
   void _setAnchorFromKey(GlobalKey key) {
@@ -2086,6 +2151,11 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     if (isDesktop) {
       content = SelectionArea(
         key: ValueKey('user_${widget.message.id}'),
+        onSelectionChanged: (selection) =>
+            _userSelectionText = selection?.plainText,
+        // The bubble's own context menu owns right-click and offers the
+        // selection, so the region must not open its toolbar behind it.
+        contextMenuBuilder: (_, _) => const SizedBox.shrink(),
         child: content,
       );
     }
@@ -2510,7 +2580,7 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     String visualContent,
     bool enableAssistantMarkdown,
     Map<String, String> citationIndexLookup, {
-    String contentKey = '',
+    String? regionKey,
   }) {
     final bool isDesktop =
         defaultTargetPlatform == TargetPlatform.macOS ||
@@ -2553,17 +2623,17 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
       child: assistantContent,
     );
 
+    final Widget content = DefaultTextStyle.merge(
+      style: TextStyle(fontSize: baseAssistant, height: 1.5),
+      child: assistantContent,
+    );
+    if (regionKey == null) return RepaintBoundary(child: content);
+    // Keep the region on the text itself: the bubble then still hugs its text
+    // under the fit-content option.
     return RepaintBoundary(
       child: SelectionArea(
-        key: ValueKey(
-          contentKey.isEmpty
-              ? 'assistant_${widget.message.id}'
-              : 'assistant_${widget.message.id}_$contentKey',
-        ),
-        child: DefaultTextStyle.merge(
-          style: TextStyle(fontSize: baseAssistant, height: 1.5),
-          child: assistantContent,
-        ),
+        key: ValueKey('assistant_${widget.message.id}_$regionKey'),
+        child: content,
       ),
     );
   }
@@ -2608,7 +2678,8 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
   }
 
   /// One bubble per text block, or one per paragraph when the split option is
-  /// on. [blockKey] disambiguates the selection areas of sibling bubbles.
+  /// on. Split paragraphs share a single selection region: a region per bubble
+  /// would cut a drag off at every bubble edge.
   List<Widget> _buildAssistantTextBubbles(
     BuildContext context,
     String visualContent,
@@ -2622,15 +2693,33 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     final parts = split
         ? splitAssistantParagraphs(visualContent)
         : <String>[visualContent];
-    return <Widget>[
+    final bubbles = <Widget>[
       for (var i = 0; i < parts.length; i++)
         _buildAssistantTextBlock(
           context,
           parts[i],
           enableAssistantMarkdown,
           citationIndexLookup,
-          contentKey: parts.length == 1 ? '' : '$blockKey.$i',
+          bubbleKey: '$blockKey.$i',
+          ownsSelectionRegion: parts.length == 1,
         ),
+    ];
+    if (bubbles.length == 1) {
+      // The single bubble owns its region, so its measured width stays the
+      // width of its own text.
+      return bubbles;
+    }
+    // Every paragraph of a split block shares one region: a region per bubble
+    // would cut a drag off at each bubble edge.
+    return <Widget>[
+      SelectionArea(
+        key: ValueKey('assistant_${widget.message.id}_$blockKey'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: _interleaveAssistantBubbles(bubbles),
+        ),
+      ),
     ];
   }
 
@@ -2639,18 +2728,24 @@ class _ChatMessageWidgetState extends State<ChatMessageWidget> {
     String visualContent,
     bool enableAssistantMarkdown,
     Map<String, String> citationIndexLookup, {
-    String contentKey = '',
+    required String bubbleKey,
+    required bool ownsSelectionRegion,
   }) {
     return _assistantBlockWidth(
       context,
-      child: _buildAssistantBubbleContainer(
-        context: context,
-        child: _buildAssistantTextContent(
-          context,
-          visualContent,
-          enableAssistantMarkdown,
-          citationIndexLookup,
-          contentKey: contentKey,
+      child: KeyedSubtree(
+        // One key per rendered bubble, so tests and diagnostics can tell the
+        // split option apart from the single-bubble layout.
+        key: ValueKey('assistant-bubble:${widget.message.id}:$bubbleKey'),
+        child: _buildAssistantBubbleContainer(
+          context: context,
+          child: _buildAssistantTextContent(
+            context,
+            visualContent,
+            enableAssistantMarkdown,
+            citationIndexLookup,
+            regionKey: ownsSelectionRegion ? bubbleKey : null,
+          ),
         ),
       ),
     );

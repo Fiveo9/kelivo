@@ -9,6 +9,7 @@ import 'package:Kelivo/core/providers/settings_provider.dart';
 import 'package:Kelivo/icons/lucide_adapter.dart';
 import 'package:Kelivo/l10n/app_localizations.dart';
 import 'package:Kelivo/shared/widgets/ios_tactile.dart';
+import 'package:Kelivo/shared/widgets/selection_region.dart';
 import 'package:Kelivo/shared/widgets/snackbar.dart';
 import 'package:Kelivo/theme/app_font_weights.dart';
 import 'package:Kelivo/theme/app_semantic_colors.dart';
@@ -332,19 +333,21 @@ class _DiffLine extends StatelessWidget {
         cs.onSurface.withValues(alpha: 0.82),
       ),
     };
+    final TextStyle lineStyle = TextStyle(
+      fontFamily: fontFamily,
+      fontSize: 12,
+      height: 1.45,
+      color: foreground,
+    );
     return ColoredBox(
       color: background ?? Colors.transparent,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
-        child: SelectableText(
-          line,
-          style: TextStyle(
-            fontFamily: fontFamily,
-            fontSize: 12,
-            height: 1.45,
-            color: foreground,
-          ),
-        ),
+        // Diff lines inside a tool result belong to the surrounding region;
+        // one SelectableText per line would make every line its own region.
+        child: hasAmbientSelectionRegion(context)
+            ? Text(line, style: lineStyle)
+            : SelectableText(line, style: lineStyle),
       ),
     );
   }

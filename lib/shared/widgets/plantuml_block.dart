@@ -11,6 +11,7 @@ import '../../icons/lucide_adapter.dart';
 import '../../utils/plantuml_encoder.dart';
 import 'export_capture_scope.dart';
 import 'ios_tactile.dart';
+import 'selection_region.dart';
 import 'snackbar.dart';
 
 enum _PlantUMLTab { image, code }
@@ -200,6 +201,18 @@ class _PlantUMLBlockState extends State<PlantUMLBlock> {
   }
 
   Widget _buildCodeView(BuildContext context, _PlantUMLBlockColors colors) {
+    final TextStyle codeStyle = TextStyle(
+      color: colors.textPrimary,
+      fontFamily: 'monospace',
+      fontSize: 13,
+      height: 1.5,
+    );
+    // Source code inside a message stays in the message's selection region; a
+    // SelectableText here would open a second region and cut drag selection and
+    // keyboard copy off at the block (see [hasAmbientSelectionRegion]).
+    final Widget codeText = hasAmbientSelectionRegion(context)
+        ? Text(widget.code, style: codeStyle)
+        : SelectableText(widget.code, style: codeStyle);
     return Padding(
       key: const ValueKey('plantuml-code-body'),
       padding: const EdgeInsets.all(12),
@@ -221,15 +234,7 @@ class _PlantUMLBlockState extends State<PlantUMLBlock> {
             controller: _codeScrollController,
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
-              child: SelectableText(
-                widget.code,
-                style: TextStyle(
-                  color: colors.textPrimary,
-                  fontFamily: 'monospace',
-                  fontSize: 13,
-                  height: 1.5,
-                ),
-              ),
+              child: codeText,
             ),
           ),
         ),

@@ -48,6 +48,7 @@ import 'streaming_rich_text.dart';
 import 'streaming_code_fence.dart';
 import 'markdown_line_lexer.dart';
 import 'markdown_source_scan.dart';
+import 'selection_region.dart';
 
 // Inline math is parsed on the UI thread. Bound the lookahead window so a long
 // line with many unmatched openers cannot trigger repeated whole-line scans.
@@ -3647,6 +3648,10 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
             useCompactTable &&
             rows.columnCount >= 4 &&
             columnWidth * rows.columnCount > viewportWidth;
+        // A cell keeps its own selectable widget only when no surrounding
+        // region can select it (see [hasAmbientSelectionRegion]).
+        final bool cellsOwnSelectionRegion =
+            !useCompactTable && !hasAmbientSelectionRegion(context);
         final table = _buildTable(
           context,
           borderColor: borderColor,
@@ -3657,6 +3662,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
           rowCount: isExporting
               ? rows.rows.length
               : math.min(rows.rows.length, _visibleRows),
+          ownSelectionRegion: cellsOwnSelectionRegion,
         );
 
         final tableSurface = _buildTableSurface(
@@ -3688,7 +3694,8 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
         }
 
         final l10n = AppLocalizations.of(context)!;
-        return SelectionContainer.disabled(
+        return _tableSelectionScope(
+          !hasAmbientSelectionRegion(context),
           child: Container(
             key: const ValueKey('markdown-table-block'),
             width: double.infinity,
@@ -3750,6 +3757,7 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
     required double columnWidth,
     required bool fixedColumns,
     required int rowCount,
+    required bool ownSelectionRegion,
   }) {
     final columnWidths = <int, TableColumnWidth>{
       for (int i = 0; i < rows.columnCount; i++)
@@ -3780,7 +3788,8 @@ class _MarkdownTableBlockState extends State<_MarkdownTableBlock> {
                   style: style,
                   config: config,
                   appFontFamily: appFontFamily,
-                  selectable: !compact,
+                  ownSelectionRegion: ownSelectionRegion,
+                  compact: compact,
                 ),
             ],
           ),
@@ -4120,7 +4129,8 @@ class _MarkdownTableCell extends StatelessWidget {
     required this.style,
     required this.config,
     required this.appFontFamily,
-    required this.selectable,
+    required this.ownSelectionRegion,
+    required this.compact,
   });
 
   final _MarkdownTableCellData data;
@@ -4128,7 +4138,8 @@ class _MarkdownTableCell extends StatelessWidget {
   final TextStyle style;
   final GptMarkdownConfig config;
   final String? appFontFamily;
-  final bool selectable;
+  final bool ownSelectionRegion;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -4155,15 +4166,9 @@ class _MarkdownTableCell extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       child: Align(
         alignment: _alignmentFor(data.alignment),
-        child: selectable
+        child: ownSelectionRegion
             ? SelectableText.rich(textSpan, textAlign: data.alignment)
-            : RichText(
-                text: textSpan,
-                textAlign: data.alignment,
-                softWrap: true,
-                overflow: TextOverflow.visible,
-                textWidthBasis: TextWidthBasis.parent,
-              ),
+            : _cellTextInRegion(textSpan),
       ),
     );
   }
@@ -4177,6 +4182,21 @@ class _MarkdownTableCell extends StatelessWidget {
       default:
         return Alignment.centerLeft;
     }
+  }
+
+  /// Cell text that stays inside the surrounding message region. The desktop
+  /// layout keeps the cursor room [SelectableText] would have reserved, so its
+  /// wrapping and width do not change.
+  Widget _cellTextInRegion(TextSpan textSpan) {
+    final Widget text = RichText(
+      text: textSpan,
+      textAlign: data.alignment,
+      softWrap: true,
+      overflow: TextOverflow.visible,
+      textWidthBasis: TextWidthBasis.parent,
+    );
+    if (compact) return text;
+    return Padding(padding: const EdgeInsets.only(right: 3), child: text);
   }
 
   String _softBreakTableCellText(String input) {
@@ -4197,6 +4217,14 @@ class _MarkdownTableCell extends StatelessWidget {
     buffer.write(_softBreakLongTableTokens(input.substring(start)));
     return buffer.toString();
   }
+}
+
+/// Keeps a table body selectable without opening a second selection region:
+/// only a table that has no surrounding region to select in (a standalone
+/// preview) stays wrapped in [SelectionContainer.disabled].
+Widget _tableSelectionScope(bool disableSelection, {required Widget child}) {
+  if (disableSelection) return SelectionContainer.disabled(child: child);
+  return child;
 }
 
 class _MarkdownTableToolbar extends StatelessWidget {
@@ -4244,15 +4272,17 @@ class _MarkdownTableToolbar extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: cs.onSurfaceVariant.withValues(alpha: 0.80),
-                fontSize: 12,
-                fontWeight: AppFontWeights.semibold,
-                height: 1.0,
+            child: SelectionContainer.disabled(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.80),
+                  fontSize: 12,
+                  fontWeight: AppFontWeights.semibold,
+                  height: 1.0,
+                ),
               ),
             ),
           ),
@@ -6439,6 +6469,7 @@ class _SelectableHighlightViewState extends State<SelectableHighlightView> {
   late List<TextSpan> _codeTextSpans;
   bool _iosTranslationAvailable = false;
   Widget? _selectable;
+  bool _ownsSelectionRegion = true;
   String _selectedCode = '';
 
   @override
@@ -6468,7 +6499,7 @@ class _SelectableHighlightViewState extends State<SelectableHighlightView> {
     if (!widget.enableHighlight) {
       return <TextSpan>[TextSpan(text: widget.source)];
     }
-    final cacheKey = '${widget.language ?? ''} ${widget.source}';
+    final cacheKey = '${widget.language ?? ''}\u0000${widget.source}';
     final cached = _highlightNodeCache.get(cacheKey);
     if (cached != null) return _convertNodes(cached);
     try {
@@ -6583,22 +6614,49 @@ class _SelectableHighlightViewState extends State<SelectableHighlightView> {
           ? [TextSpan(text: widget.source)]
           : _codeTextSpans,
     );
-    return _selectable ??= widget.source.length > 2048
-        ? SelectionArea(
-            onSelectionChanged: (selection) =>
-                _selectedCode = selection?.plainText ?? '',
-            contextMenuBuilder: _buildChunkSelectionContextMenu,
-            // SelectableText reserves its 2px cursor plus RenderEditable's 1px
-            // caret gap, even when read-only. Keep the same wrapping and width.
-            child: Padding(
-              padding: const EdgeInsets.only(right: 3),
-              child: StreamingRichText(text: Text.rich(span)),
-            ),
-          )
-        : SelectableText.rich(
-            span,
-            contextMenuBuilder: _buildSelectionContextMenu,
-          );
+    // Selection regions do not nest, so a code block inside a message stays in
+    // the message's region instead of opening its own (see
+    // [hasAmbientSelectionRegion]). iOS keeps one for native translation.
+    final bool ownsSelectionRegion =
+        !hasAmbientSelectionRegion(context) ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    if (_selectable == null || _ownsSelectionRegion != ownsSelectionRegion) {
+      _ownsSelectionRegion = ownsSelectionRegion;
+      _selectable = ownsSelectionRegion
+          ? _buildSelectionRegion(span)
+          : _buildAmbientRegionText(span);
+    }
+    return _selectable!;
+  }
+
+  Widget _buildSelectionRegion(TextSpan span) => widget.source.length > 2048
+      ? SelectionArea(
+          onSelectionChanged: (selection) =>
+              _selectedCode = selection?.plainText ?? '',
+          contextMenuBuilder: _buildChunkSelectionContextMenu,
+          // SelectableText reserves its 2px cursor plus RenderEditable's 1px
+          // caret gap, even when read-only. Keep the same wrapping and width.
+          child: Padding(
+            padding: const EdgeInsets.only(right: 3),
+            child: StreamingRichText(text: Text.rich(span)),
+          ),
+        )
+      : SelectableText.rich(
+          span,
+          contextMenuBuilder: _buildSelectionContextMenu,
+        );
+
+  /// Plain code text inside the surrounding message region. The padding matches
+  /// the room [SelectableText] reserves for its cursor, so wrapping and width
+  /// stay the same as the variant that owns its own region.
+  Widget _buildAmbientRegionText(TextSpan span) {
+    final Widget text = widget.source.length > 2048
+        ? StreamingRichText(text: Text.rich(span))
+        : Text.rich(span);
+    return Padding(
+      padding: const EdgeInsets.only(right: 3),
+      child: text,
+    );
   }
 
   Widget _buildChunkSelectionContextMenu(
