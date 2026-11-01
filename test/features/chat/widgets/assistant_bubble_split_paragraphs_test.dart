@@ -14,7 +14,7 @@ import 'package:Kelivo/l10n/app_localizations.dart';
 
 const String _content = 'first paragraph\n\nsecond paragraph';
 
-Future<void> _pumpMessage(WidgetTester tester, {required bool split}) async {
+Future<int> _bubbleCount(WidgetTester tester, {required bool split}) async {
   final harness = await createBusinessTestHarness(
     initial: {
       'display_chat_message_background_style_v1': 'solid',
@@ -53,36 +53,15 @@ Future<void> _pumpMessage(WidgetTester tester, {required bool split}) async {
     ),
   );
   await tester.pumpAndSettle();
-}
-
-/// Bubbles are counted by the key `_buildAssistantTextBlock` puts on each of
-/// them, not by selection regions: every bubble of one reply shares a single
-/// region so a drag is never cut off at a bubble edge.
-int _bubbleCount() {
-  return find
-      .byWidgetPredicate((widget) {
-        const prefix = 'assistant-bubble:';
-        final Key? key = widget.key;
-        return key is ValueKey<String> && key.value.startsWith(prefix);
-      })
-      .evaluate()
-      .length;
+  return find.byType(SelectionArea).evaluate().length;
 }
 
 void main() {
   testWidgets('option off keeps the whole reply in one bubble', (tester) async {
-    await _pumpMessage(tester, split: false);
-
-    expect(_bubbleCount(), 1);
-    expect(find.byType(SelectionArea), findsOneWidget);
+    expect(await _bubbleCount(tester, split: false), 1);
   });
 
-  testWidgets('option on renders one bubble per paragraph in one region', (
-    tester,
-  ) async {
-    await _pumpMessage(tester, split: true);
-
-    expect(_bubbleCount(), 2);
-    expect(find.byType(SelectionArea), findsOneWidget);
+  testWidgets('option on renders one bubble per paragraph', (tester) async {
+    expect(await _bubbleCount(tester, split: true), 2);
   });
 }

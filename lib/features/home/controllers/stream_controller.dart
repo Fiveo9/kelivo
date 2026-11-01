@@ -1,3 +1,4 @@
+import '../../../core/services/api/request_image_context.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
@@ -9,8 +10,10 @@ import '../../../core/providers/settings_provider.dart';
 import '../../../core/services/api/chat_api_service.dart';
 import '../../../core/services/api/stream/stream_chunk.dart';
 import '../../../core/services/api/stream/stream_chunk_handler.dart';
+import 'assistant_part_snapshots.dart';
 import '../../../core/services/api/stream/stream_text_buffer.dart';
 import '../../chat/widgets/chat_message_widget.dart';
+import '../../chat/utils/tool_event_deduplication.dart';
 import '../../../utils/markdown_media_sanitizer.dart';
 import 'streaming_content_notifier.dart';
 
@@ -244,7 +247,7 @@ class StreamController {
 
   /// Set tool parts for a message.
   void setToolParts(String messageId, List<ToolUIPart> parts) {
-    _toolParts[messageId] = parts;
+    _toolParts[messageId] = ToolPartSnapshot(parts);
   }
 
   /// Remove tool parts for a message.
@@ -404,26 +407,27 @@ class StreamController {
   List<ToolUIPart> dedupeToolPartsList(List<ToolUIPart> parts) {
     final completedIds = <String>{
       for (final p in parts)
-        if (p.id.trim().isNotEmpty && _hasToolContent(p.content)) p.id.trim(),
+        if (p.id.trim().isNotEmpty && hasCompletedToolContent(p.content))
+          p.id.trim(),
     };
     final completedNoIdBases = <String>{
       for (final p in parts)
-        if (p.id.trim().isEmpty && _hasToolContent(p.content))
-          _toolDedupeBase(p.toolName, p.arguments),
+        if (p.id.trim().isEmpty && hasCompletedToolContent(p.content))
+          toolEventBaseKey(p.toolName, p.arguments),
     };
     final indexByKey = <String, int>{};
     final out = <ToolUIPart>[];
     for (final p in parts) {
       final id = p.id.trim();
-      if (!_hasToolContent(p.content) &&
+      if (!hasCompletedToolContent(p.content) &&
           ((id.isNotEmpty && completedIds.contains(id)) ||
               (id.isEmpty &&
                   completedNoIdBases.contains(
-                    _toolDedupeBase(p.toolName, p.arguments),
+                    toolEventBaseKey(p.toolName, p.arguments),
                   )))) {
         continue;
       }
-      final key = _toolDedupeKey(
+      final key = toolEventIdentityKey(
         id: p.id,
         name: p.toolName,
         arguments: p.arguments,
@@ -438,79 +442,6 @@ class StreamController {
       out.add(p);
     }
     return out;
-  }
-
-  /// Deduplicate raw persisted tool events.
-  List<Map<String, dynamic>> dedupeToolEvents(
-    List<Map<String, dynamic>> events,
-  ) {
-    final completedIds = <String>{
-      for (final e in events)
-        if ((e['id']?.toString() ?? '').trim().isNotEmpty &&
-            _hasToolContent(e['content']?.toString()))
-          (e['id']?.toString() ?? '').trim(),
-    };
-    final completedNoIdBases = <String>{
-      for (final e in events)
-        if ((e['id']?.toString() ?? '').trim().isEmpty &&
-            _hasToolContent(e['content']?.toString()))
-          _toolDedupeBase(
-            e['name']?.toString() ?? '',
-            (e['arguments'] as Map?)?.cast<String, dynamic>() ??
-                const <String, dynamic>{},
-          ),
-    };
-    final indexByKey = <String, int>{};
-    final out = <Map<String, dynamic>>[];
-    for (final e in events) {
-      final id = (e['id']?.toString() ?? '').trim();
-      final name = (e['name']?.toString() ?? '');
-      final args =
-          ((e['arguments'] as Map?)?.cast<String, dynamic>() ??
-          const <String, dynamic>{});
-      if (!_hasToolContent(e['content']?.toString()) &&
-          ((id.isNotEmpty && completedIds.contains(id)) ||
-              (id.isEmpty &&
-                  completedNoIdBases.contains(_toolDedupeBase(name, args))))) {
-        continue;
-      }
-      final key = _toolDedupeKey(
-        id: id,
-        name: name,
-        arguments: args,
-        content: e['content']?.toString(),
-      );
-      final normalizedEvent = e.map((k, v) => MapEntry(k.toString(), v));
-      final existingIndex = indexByKey[key];
-      if (existingIndex != null) {
-        if (id.isNotEmpty) out[existingIndex] = normalizedEvent;
-        continue;
-      }
-      indexByKey[key] = out.length;
-      out.add(normalizedEvent);
-    }
-    return out;
-  }
-
-  String _toolDedupeBase(String name, Map<String, dynamic> arguments) {
-    return 'name:$name|args:${_encodeJson(arguments)}';
-  }
-
-  bool _hasToolContent(String? content) => content?.trim().isNotEmpty == true;
-
-  String _toolDedupeKey({
-    required String id,
-    required String name,
-    required Map<String, dynamic> arguments,
-    String? content,
-  }) {
-    final trimmedId = id.trim();
-    if (trimmedId.isNotEmpty) return 'id:$trimmedId';
-
-    final base = _toolDedupeBase(name, arguments);
-    final trimmedContent = content?.trim();
-    if (trimmedContent == null || trimmedContent.isEmpty) return base;
-    return '$base|content:$trimmedContent';
   }
 
   // ============================================================================
@@ -943,7 +874,7 @@ class StreamController {
         loading: true,
       ),
     );
-    _toolParts[messageId] = dedupeToolPartsList(existing);
+    _toolParts[messageId] = ToolPartSnapshot(dedupeToolPartsList(existing));
     if (getCurrentConversationId() == conversationId) {
       streamingContentNotifier.notifyToolPartsUpdated(
         messageId,
@@ -1047,7 +978,7 @@ class StreamController {
         metadata: result.metadata,
       );
     } catch (_) {}
-    _toolParts[messageId] = dedupeToolPartsList(parts);
+    _toolParts[messageId] = ToolPartSnapshot(dedupeToolPartsList(parts));
     if (getCurrentConversationId() == conversationId) {
       final splits = _contentSplits[messageId];
       streamingContentNotifier.notifyToolPartsUpdated(
@@ -1209,18 +1140,7 @@ class StreamController {
   Map<String, dynamic>? _toolPayloadFromHandler(
     StreamingState state,
     String id,
-  ) {
-    for (final part in state.partsHandler.parts.reversed) {
-      if (part is! ToolCallPart) continue;
-      try {
-        final decoded = jsonDecode(part.payloadJson);
-        if (decoded is Map && (decoded['id'] ?? '').toString() == id) {
-          return decoded.cast<String, dynamic>();
-        }
-      } catch (_) {}
-    }
-    return null;
-  }
+  ) => state.partsHandler.toolPayload(id);
 
   String _toolResultName(
     StreamingState state,
@@ -1519,24 +1439,26 @@ class StreamController {
     try {
       final events = dedupeToolEvents(getToolEventsFromDb(messageId));
       if (events.isNotEmpty) {
-        _toolParts[messageId] = events
-            .map(
-              (e) => ToolUIPart(
-                id: (e['id'] ?? '').toString(),
-                toolName: (e['name'] ?? '').toString(),
-                arguments:
-                    (e['arguments'] as Map?)?.cast<String, dynamic>() ??
-                    const <String, dynamic>{},
-                content: (e['content']?.toString().isNotEmpty == true)
-                    ? e['content'].toString()
-                    : null,
-                metadata: e['metadata'] is Map
-                    ? Map<String, dynamic>.from(e['metadata'] as Map)
-                    : null,
-                loading: !(e['content']?.toString().isNotEmpty == true),
-              ),
-            )
-            .toList();
+        _toolParts[messageId] = ToolPartSnapshot(
+          events
+              .map(
+                (e) => ToolUIPart(
+                  id: (e['id'] ?? '').toString(),
+                  toolName: (e['name'] ?? '').toString(),
+                  arguments:
+                      (e['arguments'] as Map?)?.cast<String, dynamic>() ??
+                      const <String, dynamic>{},
+                  content: (e['content']?.toString().isNotEmpty == true)
+                      ? e['content'].toString()
+                      : null,
+                  metadata: e['metadata'] is Map
+                      ? Map<String, dynamic>.from(e['metadata'] as Map)
+                      : null,
+                  loading: !(e['content']?.toString().isNotEmpty == true),
+                ),
+              )
+              .toList(),
+        );
       }
     } catch (_) {}
 
@@ -1613,6 +1535,7 @@ class GenerationContext {
     required this.apiMessages,
     this.contextUsageConfiguration,
     this.contextUsageRevision,
+    this.imageContext,
     required this.userImagePaths,
     required this.allowImagesApiRouting,
     required this.providerKey,
@@ -1639,6 +1562,7 @@ class GenerationContext {
   final List<Map<String, dynamic>> apiMessages;
   final Object? contextUsageConfiguration;
   final int? contextUsageRevision;
+  final RequestImageContext? imageContext;
   final List<String> userImagePaths;
   final bool allowImagesApiRouting;
   final String providerKey;
@@ -1747,6 +1671,7 @@ class StreamingState {
   List<int> reasoningCountAtSplit = <int>[];
   List<int> toolCountAtSplit = <int>[];
   final StreamChunkHandler partsHandler;
+  final partSnapshots = AssistantPartSnapshots();
   RetryStatus? retryStatus;
 
   String get messageId => ctx.assistantMessage.id;

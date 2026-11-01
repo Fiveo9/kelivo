@@ -29,6 +29,7 @@ class ProviderOAuthService extends ChangeNotifier {
   final http.Client Function(ProviderConfig) _clientFactory;
   SettingsProvider? _settings;
   final _refreshes = <String, Future<ProviderConfig>>{};
+  final _modelSyncs = <(SettingsProvider, String), Future<void>>{};
   final _usage = <String, ProviderUsageSnapshot>{};
   final _usageRequests = <String, Future<ProviderUsageSnapshot>>{};
   OAuthCancellation? _login;
@@ -174,7 +175,10 @@ class ProviderOAuthService extends ChangeNotifier {
         throw const ProviderOAuthException(ProviderOAuthFailure.cancelled);
       }
       final saved = (providerId == null ? config : _current(providerId)!)
-          .copyWith(oauthCredentials: credentials);
+          .copyWith(
+            oauthCredentials: credentials,
+            oauthModelsClientVersion: null,
+          );
       await settings.setProviderConfig(saved.id, saved);
       if (providerId == null) {
         await settings.setProvidersOrder([
@@ -200,7 +204,7 @@ class ProviderOAuthService extends ChangeNotifier {
     _usage.remove(_sessionKey(config));
     await _settings!.setProviderConfig(
       id,
-      config.copyWith(oauthCredentials: null),
+      config.copyWith(oauthCredentials: null, oauthModelsClientVersion: null),
     );
     notifyListeners();
   }
@@ -288,6 +292,8 @@ class ProviderOAuthService extends ChangeNotifier {
         statusCode: error.statusCode,
         code: error.code,
         message: error.message,
+        stage: error.stage,
+        transportFailure: error.transportFailure,
       );
     } finally {
       client.close();
@@ -354,31 +360,79 @@ class ProviderOAuthService extends ChangeNotifier {
                     !RegExp(
                       r'grok-(?:imagine|stt|voice|tts)',
                     ).hasMatch(row['id'] as String)))
-              _OAuthModelSpec(
-                row: row,
-                base: _oauthDiscoveredSpec(
-                  ModelSpecResolver.instance
-                      .resolve(
-                        config,
-                        row['id'] as String,
-                        displayName:
-                            oauthString(row['display_name']) ??
-                            oauthString(row['name']) ??
-                            row['id'] as String,
-                      )
-                      .spec,
-                  row,
-                ),
-              ),
+              _modelFromRow(config, row),
         ];
       });
 
+  _OAuthModelSpec _modelFromRow(
+    ProviderConfig config,
+    Map<String, dynamic> row,
+  ) => _OAuthModelSpec(
+    row: row,
+    base: _oauthDiscoveredSpec(
+      ModelSpecResolver.instance.spec(
+        config,
+        row['id'] as String,
+        displayName:
+            oauthString(row['display_name']) ??
+            oauthString(row['name']) ??
+            row['id'] as String,
+      ),
+      row,
+    ),
+  );
+
+  /// Like OMP's versioned Codex cache, refresh each account after a client
+  /// version change. Keep its saved models usable if discovery is unavailable.
+  Future<void> syncOutdatedModels(SettingsProvider settings) async {
+    await settings.loaded;
+    if (!identical(settings, _settings)) return;
+    // Startup discovery can run before the first rebuild applies the proxy.
+    settings.applyGlobalProxyOverridesIfNeeded();
+    for (final id in settings.providerConfigs.keys.toList()) {
+      if (!identical(settings, _settings)) return;
+      final config = _current(id);
+      if (config == null ||
+          !config.enabled ||
+          config.oauthProvider != OAuthProvider.chatgpt ||
+          config.oauthCredentials == null ||
+          config.oauthCredentials!.requiresLogin ||
+          config.oauthModelsClientVersion == codexClientVersion) {
+        continue;
+      }
+      try {
+        await syncModels(id);
+      } catch (_) {
+        // Leave the version unchanged so the next launch or manual sync retries.
+      }
+    }
+  }
+
   Future<void> syncModels(String id) async {
+    final settings = _settings;
     final before = _current(id);
-    if (before == null) return;
+    if (settings == null || before == null) return;
+    final key = (settings, _sessionKey(before));
+    final pending = _modelSyncs[key];
+    if (pending != null) return pending;
+    final request = _syncModels(settings, before);
+    _modelSyncs[key] = request;
+    try {
+      await request;
+    } finally {
+      _modelSyncs.remove(key);
+    }
+  }
+
+  Future<void> _syncModels(
+    SettingsProvider settings,
+    ProviderConfig before,
+  ) async {
     final list = await models(before);
-    final current = _current(id);
-    if (current == null ||
+    final current = _current(before.id);
+    if (!identical(settings, _settings) ||
+        current == null ||
+        current.oauthProvider != before.oauthProvider ||
         current.oauthCredentials?.sessionId !=
             before.oauthCredentials?.sessionId) {
       return;
@@ -391,7 +445,8 @@ class ProviderOAuthService extends ChangeNotifier {
           : const <String, dynamic>{};
       overrides[model.id] = mergeOAuthModelOverride(
         existing: overrides[model.id],
-        model: model,
+        // Model edits can land while discovery is in flight.
+        model: model is _OAuthModelSpec ? _modelFromRow(current, row) : model,
         reasoning: oauthDiscoveredReasoning(provider, row),
         contextWindow: _oauthContextWindow(row),
         extra: {
@@ -400,12 +455,15 @@ class ProviderOAuthService extends ChangeNotifier {
         },
       );
     }
-    await _settings!.setProviderConfig(
-      id,
+    await settings.setProviderConfig(
+      current.id,
       current.copyWith(
         models: list.map((e) => e.id).toList(),
         modelOverrides: overrides,
         oauthModelsSyncedAt: DateTime.now(),
+        oauthModelsClientVersion: provider == OAuthProvider.chatgpt
+            ? codexClientVersion
+            : null,
       ),
     );
   }
@@ -449,8 +507,6 @@ const _deletedOAuthThinkingKeys = {
   'oauthThinkingDefaultEffort',
 };
 
-const _kimiDefaultLevels = ['low', 'medium', 'high'];
-
 String kimiOAuthProtocol(Map<String, dynamic> row) {
   return row['protocol'] == null && row.containsKey('protocol')
       ? 'openai'
@@ -459,11 +515,15 @@ String kimiOAuthProtocol(Map<String, dynamic> row) {
 
 /// True/false when the catalog row states reasoning support; null if omitted.
 bool? oauthRowReasoningSupport(Map<String, dynamic> row) {
+  switch (row['supports_thinking_type']) {
+    case 'only':
+    case 'both':
+      return true;
+    case 'no':
+      return false;
+  }
   if (row.containsKey('supports_reasoning')) {
     return row['supports_reasoning'] == true;
-  }
-  if (row.containsKey('supports_thinking_type')) {
-    return const {'only', 'both'}.contains(row['supports_thinking_type']);
   }
   final efforts = oauthMap(row['think_efforts']);
   if (efforts.containsKey('support')) {
@@ -487,23 +547,21 @@ ReasoningSpecOverride? oauthDiscoveredReasoning(
   final required = row['supports_thinking_type'] == 'only';
   switch (provider) {
     case OAuthProvider.kimi:
-      if (kimiOAuthProtocol(row) == 'anthropic') {
-        final adaptive = oauthMap(row['think_efforts'])['support'] == true;
-        return ReasoningSpecOverride.fromJson({
-          'dialect': adaptive
-              ? ReasoningDialect.anthropicAdaptiveEffort.name
-              : ReasoningDialect.anthropicBudget.name,
-          'levels': _kimiDefaultLevels,
-          'canDisable': !required,
-        });
-      }
-      final levels = _oauthLevelNames(row);
+      final levels = oauthMap(row['think_efforts'])['support'] == true
+          ? _oauthLevelNames(row)
+          : <String>[];
+      final defaultLevel = _oauthDefaultLevel(row);
       return ReasoningSpecOverride.fromJson({
-        'dialect': ReasoningDialect.kimiThinking.name,
-        'levels': levels.isEmpty ? _kimiDefaultLevels : levels,
+        'dialect': kimiOAuthProtocol(row) == 'anthropic'
+            ? (levels.isNotEmpty
+                  ? ReasoningDialect.anthropicAdaptiveEffort.name
+                  : ReasoningDialect.anthropicBudget.name)
+            : ReasoningDialect.kimiThinking.name,
+        'levels': levels,
         'canDisable': !required,
-        if (_oauthDefaultLevel(row) case final defaultLevel?)
-          'defaultLevel': defaultLevel,
+        'defaultLevel': levels.contains(defaultLevel) ? defaultLevel : 'auto',
+        // A fresh roster must retire controls saved by an older discovery.
+        'budgets': <String, int>{},
       });
     case OAuthProvider.chatgpt:
     case OAuthProvider.grok:

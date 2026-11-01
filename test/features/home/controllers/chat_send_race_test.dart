@@ -1,3 +1,8 @@
+import 'package:Kelivo/l10n/app_localizations_en.dart';
+import 'package:Kelivo/core/models/quote_ref.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_context_submission.dart';
+import 'package:Kelivo/features/intelligent_ui/host/ui_user_context_parts.dart';
+import 'package:Kelivo/features/intelligent_ui/models/ui_context_attachment.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -12,10 +17,13 @@ import 'package:provider/provider.dart';
 import '../../../support/business_test_harness.dart';
 import '../../../support/gated_xfile.dart';
 import 'package:Kelivo/core/database/chat_database_repository.dart';
+import 'package:Kelivo/core/database/business_preferences.dart';
 import 'package:Kelivo/core/models/chat_input_data.dart';
 import 'package:Kelivo/core/models/chat_message.dart';
 import 'package:Kelivo/core/models/composer_draft.dart';
 import 'package:Kelivo/core/models/conversation.dart';
+import 'package:Kelivo/core/models/compress_context_options.dart';
+import 'package:Kelivo/core/services/chat/context_compression_service.dart';
 import 'package:Kelivo/core/models/message_part.dart';
 import 'package:Kelivo/core/models/preset_message.dart';
 import 'package:Kelivo/core/providers/assistant_provider.dart';
@@ -32,7 +40,9 @@ import 'package:Kelivo/features/home/controllers/home_page_controller.dart';
 import 'package:Kelivo/features/home/controllers/chat_actions.dart';
 import 'package:Kelivo/features/home/controllers/scroll_controller.dart';
 import 'package:Kelivo/features/home/services/ask_user_interaction_service.dart';
+import 'package:Kelivo/features/home/utils/model_display_helper.dart';
 import 'package:Kelivo/features/home/widgets/chat_input_bar.dart';
+import 'package:Kelivo/features/search/services/global_session_search_service.dart';
 import 'package:Kelivo/l10n/app_localizations.dart';
 import 'package:Kelivo/icons/lucide_adapter.dart';
 
@@ -79,6 +89,7 @@ class _GatedChatService extends ChatService {
     required String role,
     String content = '',
     List<MessagePart>? parts,
+    List<QuoteRef> quotes = const [],
     String? modelId,
     String? providerId,
     int? totalTokens,
@@ -90,6 +101,7 @@ class _GatedChatService extends ChatService {
     int? version,
     bool selectVersion = false,
     String? temporaryAfterGroupId,
+    UiContextSubmission? uiContext,
   }) async {
     if (content == 'preset question' && presetHold != null) {
       presetConversationId = conversationId;
@@ -100,6 +112,7 @@ class _GatedChatService extends ChatService {
       role: role,
       content: content,
       parts: parts,
+      quotes: quotes,
       modelId: modelId,
       providerId: providerId,
       totalTokens: totalTokens,
@@ -111,6 +124,7 @@ class _GatedChatService extends ChatService {
       version: version,
       selectVersion: selectVersion,
       temporaryAfterGroupId: temporaryAfterGroupId,
+      uiContext: uiContext,
     );
   }
 
@@ -121,6 +135,7 @@ class _GatedChatService extends ChatService {
     required String providerId,
     required String anchorGroupId,
     required bool truncateFuture,
+    String? expectedContextState,
   }) async {
     regenerationEntered = true;
     await regenerationHold?.future;
@@ -138,7 +153,10 @@ class _GatedChatService extends ChatService {
     required String messageId,
     String content = '',
     List<MessagePart>? parts,
+    List<QuoteRef>? quotes,
     DraftSubmission? draftSubmission,
+    UiContextSubmission? uiContext,
+    String? expectedContextState,
   }) async {
     if (!holdAfterVersionSave) {
       versionSaveEntered = true;
@@ -148,7 +166,10 @@ class _GatedChatService extends ChatService {
       messageId: messageId,
       content: content,
       parts: parts,
+      quotes: quotes,
       draftSubmission: draftSubmission,
+      uiContext: uiContext,
+      expectedContextState: expectedContextState,
     );
     if (holdAfterVersionSave) {
       versionSaveEntered = true;
@@ -338,6 +359,8 @@ void main() {
     WidgetTester tester, {
     bool withSuggestions = false,
     bool withComposer = false,
+    List<dynamic>? storedAssistants,
+    BusinessPreferences? assistantPreferences,
   }) async {
     HomePageController? controller;
     late Zone sendZone;
@@ -367,14 +390,27 @@ void main() {
         await settings.resetSuggestionModel();
       }
 
-      final assistantPrefs = createBusinessTestPreferences();
+      final assistantPrefs =
+          assistantPreferences ?? createBusinessTestPreferences();
       await assistantPrefs.load();
+      if (storedAssistants != null) {
+        await assistantPrefs.setString(
+          'assistants_v1',
+          jsonEncode(storedAssistants),
+        );
+        await assistantPrefs.setString(
+          'current_assistant_id_v1',
+          (storedAssistants.first as Map)['id'] as String,
+        );
+      }
       assistantProvider = AssistantProvider(preferences: assistantPrefs);
       await assistantProvider.loaded;
-      final assistantId = await assistantProvider.addAssistant(
-        name: 'Test Assistant',
-      );
-      await assistantProvider.setCurrentAssistant(assistantId);
+      if (storedAssistants == null && assistantPreferences == null) {
+        final assistantId = await assistantProvider.addAssistant(
+          name: 'Test Assistant',
+        );
+        await assistantProvider.setCurrentAssistant(assistantId);
+      }
     });
     await tester.pumpWidget(
       MultiProvider(
@@ -1189,6 +1225,832 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('orphaned assistant history still accepts a composer send', (
+    tester,
+  ) async {
+    // The assistant JSON is a real old writer's output. Only the topic's
+    // ownership is stale, as older deletion/import paths could leave it;
+    // this regression must not depend on malformed assistant fields.
+    final fixtures =
+        jsonDecode(
+              File(
+                'test/fixtures/assistants/historical_writers.json',
+              ).readAsStringSync(),
+            )
+            as List;
+    final fixture = fixtures.firstWhere(
+      (value) => ((value as Map)['writers'] as List).any(
+        (writer) => ((writer as Map)['refs'] as List).contains('v1.3.0'),
+      ),
+    );
+    final storedAssistants = (fixture as Map)['assistants'] as List;
+    final originalIds = storedAssistants
+        .map((value) => (value as Map)['id'] as String)
+        .toList();
+    final controller = await pumpHarness(
+      tester,
+      storedAssistants: storedAssistants,
+    );
+    await tester.runAsync(() async {
+      await settings.disableTitleGeneration();
+      await settings.setNewChatOnLaunch(false);
+      final displayedAssistant = assistantProvider.currentAssistant!;
+      await assistantProvider.updateAssistant(
+        displayedAssistant.copyWith(
+          chatModelProvider: 'SiliconFlow',
+          chatModelId: 'assistant-model',
+        ),
+      );
+      final conversation = await service.createConversation(
+        title: 'Existing topic',
+        assistantId: 'missing-assistant',
+      );
+      final original = await service.addMessage(
+        conversationId: conversation.id,
+        role: 'user',
+        content: 'preserved history',
+      );
+      expect(
+        await GlobalSessionSearchService.search(
+          chatService: service,
+          query: 'preserved history',
+        ),
+        hasLength(1),
+      );
+      await controller.initChat();
+      expect(controller.currentConversation!.id, conversation.id);
+      // Startup used to install the topic's missing owner as the selection,
+      // while currentAssistant silently displayed the first valid assistant.
+      // That leaked the invalid ID into every subsequent new conversation.
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      final firstNewConversation = await controller.debugViewModel
+          .createNewConversation();
+      expect(firstNewConversation!.assistantId, displayedAssistant.id);
+      await controller.debugViewModel.switchConversation(conversation.id);
+      final drafts = service.composerDrafts!;
+      await drafts.load(conversation.id, assistantId: conversation.assistantId);
+      const input = ComposerDraftInput(text: 'continue this topic');
+      final submission = await drafts.beginSubmission(conversation.id, input);
+      final result = await controller.sendMessage(
+        input.toInput(submission: submission),
+      );
+      expect(result, ChatInputSubmissionResult.sent);
+      await waitFor(() => streamRequestCount == 1, 'orphaned topic request');
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(conversation.id),
+        'orphaned topic reply',
+      );
+      expect(streamRequests.single['model'], 'assistant-model');
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      expect(
+        assistantProvider.assistants.map((assistant) => assistant.id),
+        originalIds,
+      );
+      final messages = await service.loadMessages(conversation.id);
+      expect(messages.first.id, original.id);
+      expect(messages.first.content, 'preserved history');
+      expect(messages.last.content, 'ok');
+      expect(
+        (await repository.getMessage(original.id))!.content,
+        'preserved history',
+      );
+      expect(
+        service.getConversation(conversation.id)!.assistantId,
+        'missing-assistant',
+      );
+      expect(drafts.peek(conversation.id)!.pending, isNull);
+
+      expect(
+        await controller.debugViewModel.regenerateAtMessage(messages.last),
+        isTrue,
+      );
+      await waitFor(
+        () => streamRequestCount == 2,
+        'orphaned topic regeneration',
+      );
+      await waitFor(
+        () => !controller.chatController.isConversationLoading(conversation.id),
+        'regenerated reply',
+      );
+      expect(streamRequests.last['model'], 'assistant-model');
+
+      final otherId = await assistantProvider.addAssistant(name: 'Other');
+      await assistantProvider.setCurrentAssistant(otherId);
+      await controller.debugViewModel.createNewConversation();
+      await controller.debugViewModel.switchConversation(conversation.id);
+      expect(assistantProvider.currentAssistantId, displayedAssistant.id);
+      expect(controller.messages.first.id, original.id);
+      final newConversation = await controller.debugViewModel
+          .createNewConversation();
+      expect(newConversation!.assistantId, displayedAssistant.id);
+
+      await assistantProvider.setCurrentAssistant(otherId);
+      final prepared = await controller.debugViewModel
+          .prepareConversationSwitch(conversation.id);
+      expect(assistantProvider.currentAssistantId, otherId);
+      controller.debugViewModel.commitConversationSwitch(prepared!);
+      await waitFor(
+        () => assistantProvider.currentAssistantId == displayedAssistant.id,
+        'assistant selection after opening a search result',
+      );
+      expect(controller.messages.first.id, original.id);
+      expect(assistantProvider.assistants.map((assistant) => assistant.id), [
+        ...originalIds,
+        otherId,
+      ]);
+    });
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final newChatOnLaunch in [false, true]) {
+    testWidgets(
+      'recovered model survives reorder and restart: newChat=$newChatOnLaunch',
+      (tester) async {
+        final business = (await tester.runAsync(
+          () => createBusinessTestHarness(
+            initial: {
+              'assistants_v1': jsonEncode(const [
+                {
+                  'id': 'recovery-a',
+                  'name': 'A',
+                  'chatModelProvider': 'SiliconFlow',
+                  'chatModelId': 'model-a',
+                },
+                {
+                  'id': 'recovery-b',
+                  'name': 'B',
+                  'chatModelProvider': 'SiliconFlow',
+                  'chatModelId': 'model-b',
+                },
+              ]),
+              'current_assistant_id_v1': 'recovery-a',
+            },
+          ),
+        ))!;
+        var controller = await pumpHarness(
+          tester,
+          assistantPreferences: business.preferences,
+        );
+        late Conversation conversation;
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          conversation = await service.createConversation(
+            title: 'Recovered topic',
+            assistantId: 'missing-assistant',
+          );
+          await controller.debugViewModel.switchConversation(conversation.id);
+          await assistantProvider.reorderAssistants(1, 0);
+          expect(assistantProvider.currentAssistantId, 'recovery-a');
+          final display = getModelDisplayInfo(
+            settings,
+            conversation: controller.currentConversation,
+            assistant: assistantProvider.currentAssistant,
+          );
+          expect(display.modelDisplay, 'model-a');
+          expect(
+            await controller.sendMessage(ChatInputData(text: 'after reorder')),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 1 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'reply after reorder',
+          );
+          expect(streamRequests.single['model'], display.modelId);
+        });
+        await tester.pumpWidget(const SizedBox());
+        controller = await pumpHarness(
+          tester,
+          assistantPreferences: BusinessPreferences(business.repository),
+        );
+        await tester.runAsync(() async {
+          await settings.disableTitleGeneration();
+          await settings.setNewChatOnLaunch(newChatOnLaunch);
+          await controller.initChat();
+          expect(assistantProvider.assistants.first.id, 'recovery-b');
+          expect(assistantProvider.currentAssistantId, 'recovery-a');
+          if (newChatOnLaunch) {
+            expect(controller.currentConversation!.assistantId, 'recovery-a');
+            await controller.debugViewModel.switchConversation(conversation.id);
+          } else {
+            expect(controller.currentConversation!.id, conversation.id);
+          }
+          final display = getModelDisplayInfo(
+            settings,
+            conversation: controller.currentConversation,
+            assistant: assistantProvider.currentAssistant,
+          );
+          expect(display.modelDisplay, 'model-a');
+          expect(
+            await controller.sendMessage(ChatInputData(text: 'after restart')),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 2 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'reply after restart',
+          );
+          expect(streamRequests.last['model'], display.modelId);
+          final messages = await service.loadMessages(conversation.id);
+          expect(
+            await controller.debugViewModel.regenerateAtMessage(messages.last),
+            isTrue,
+          );
+          await waitFor(
+            () =>
+                streamRequestCount == 3 &&
+                !controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+            'regeneration after restart',
+          );
+          expect(streamRequests.last['model'], display.modelId);
+          expect(
+            service.getConversation(conversation.id)!.assistantId,
+            'missing-assistant',
+          );
+        });
+        await tester.pumpWidget(const SizedBox());
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  for (final temporary in [false, true]) {
+    testWidgets(
+      'chip-only real send and edit reach storage and provider: temporary=$temporary',
+      (tester) async {
+        final controller = await pumpHarness(tester, withComposer: true);
+        final frozen = UiContextText(
+          title: 'Line',
+          body: 'Slope: 3.1\nIntercept: 1',
+        );
+        final input = ChatInputData(
+          text: '',
+          uiContext: UiContextAttachment.history(frozen),
+        );
+        await tester.runAsync(() async {
+          final convo = temporary
+              ? await service.createDraftConversation(
+                  title: 'Temporary',
+                  temporary: true,
+                )
+              : await openConversation(controller);
+          if (temporary) controller.chatController.setDraftConversation(convo);
+          expect(
+            await controller.sendMessage(input),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(() => streamRequestCount == 1, 'chip-only request');
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'chip-only finish',
+          );
+          final messages = temporary
+              ? service.getMessages(convo.id)
+              : await service.loadMessages(convo.id);
+          final user = messages.firstWhere((message) => message.role == 'user');
+          expect(UiUserContextParts.read(user.parts).context, frozen);
+          expect(
+            (streamRequests.single['messages'] as List)
+                .where((m) => m['role'] == 'user')
+                .any((m) => m['content'].toString().contains(frozen.exactText)),
+            isTrue,
+          );
+          await controller.startUserMessageEdit(user);
+          expect(
+            await controller.sendMessage(input),
+            ChatInputSubmissionResult.sent,
+          );
+          await waitFor(
+            () => streamRequestCount == 2,
+            'chip-only edited request',
+          );
+          await waitFor(
+            () => !controller.chatController.isConversationLoading(convo.id),
+            'edited chip finish',
+          );
+          final edited = service
+              .getMessages(convo.id)
+              .where(
+                (message) => message.role == 'user' && message.version == 1,
+              )
+              .single;
+          expect(UiUserContextParts.read(edited.parts).context, frozen);
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'queued chip-only input retains its frozen state after model selection changes',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      final frozen = UiContextText(title: 'Queued', body: 'value: 73');
+      await tester.runAsync(() async {
+        final convo = await openConversation(controller);
+        streamHold = Completer<void>();
+        expect(
+          await controller.sendMessage(const ChatInputData(text: 'Start')),
+          ChatInputSubmissionResult.sent,
+        );
+        await waitFor(() => streamRequestCount == 1, 'first held request');
+        expect(
+          await controller.sendMessage(
+            ChatInputData(
+              text: '',
+              uiContext: UiContextAttachment.history(frozen),
+            ),
+          ),
+          ChatInputSubmissionResult.queued,
+        );
+        await settings.setCurrentModel('SiliconFlow', 'other-model');
+        streamHold!.complete();
+        streamHold = null;
+        await waitFor(() => streamRequestCount == 2, 'queued request');
+        await waitFor(
+          () => !controller.chatController.isConversationLoading(convo.id),
+          'queue finish',
+        );
+        final users = (await service.loadMessages(
+          convo.id,
+        )).where((m) => m.role == 'user').toList();
+        expect(UiUserContextParts.read(users.last.parts).context, frozen);
+        expect(
+          (streamRequests.last['messages'] as List)
+              .where((m) => m['role'] == 'user')
+              .any((m) => m['content'].toString().contains(frozen.exactText)),
+          isTrue,
+        );
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  for (final stale in [false, true]) {
+    testWidgets(
+      'compression budgets the frozen queued UI payload before applying: stale=$stale',
+      (tester) async {
+        final controller = await pumpHarness(tester);
+        final omitted = AppLocalizations.of(
+          tester.element(find.byType(_ControllerHarness)),
+        )!.genuiChipOmitted;
+        await tester.runAsync(() async {
+          await assistantProvider.updateAssistant(
+            assistantProvider.currentAssistant!.copyWith(maxTokens: 32),
+          );
+          final conversation = await openConversation(controller);
+          await service.addMessage(
+            conversationId: conversation.id,
+            role: 'user',
+            content: 'Old context to compress. ' * 200,
+          );
+          final frozen = UiContextText(title: 'Budget', body: 'value ' * 450);
+          final attachment = stale
+              ? UiContextAttachment.attached(
+                  source: UiContextSource(
+                    conversationId: conversation.id,
+                    revisionId: 'missing-source',
+                    surfaceKey: '0:0',
+                    sourceHash: 'a' * 64,
+                  ),
+                  text: frozen,
+                )
+              : UiContextAttachment.history(frozen);
+          final summary = ChatMessage(
+            id: 'context-summary:estimate',
+            role: 'user',
+            conversationId: conversation.id,
+            content: 'Budget summary',
+          );
+          final estimate = service.contextCompression.estimateCandidate!;
+          final bare = await estimate(conversation.id, [summary]);
+          final full = await estimate(conversation.id, [
+            summary,
+            ChatMessage(
+              role: 'user',
+              conversationId: conversation.id,
+              parts: UiUserContextParts.attach([const TextPart('')], frozen),
+            ),
+          ]);
+          expect(full.usedTokens, greaterThan(bare.usedTokens + 10));
+          final window = (bare.usedTokens + full.usedTokens) ~/ 2;
+          final config = settings.getProviderConfig('SiliconFlow');
+          await settings.setProviderConfig(
+            config.id,
+            config.copyWith(
+              modelOverrides: {
+                'test-model': {'contextWindow': window},
+              },
+            ),
+          );
+          final expected = await estimate(conversation.id, [
+            summary,
+            ChatMessage(
+              role: 'user',
+              conversationId: conversation.id,
+              parts: UiContextSubmission(
+                attachment,
+                omittedText: omitted,
+              ).resolve([const TextPart('')], sourceIsCurrent: false),
+            ),
+          ]);
+          final hold = Completer<String>();
+          var entered = false;
+          await service.contextCompression.start(
+            conversation.id,
+            CompressionRequest(
+              options: const CompressContextOptions(
+                mode: CompressContextLimitMode.unlimited,
+              ),
+              model: 'test-model',
+              generate: (_, _) {
+                entered = true;
+                return hold.future;
+              },
+              quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+            ),
+          );
+          await waitFor(() => entered, 'compression generation');
+          expect(
+            await controller.sendMessage(
+              ChatInputData(text: '', uiContext: attachment),
+            ),
+            ChatInputSubmissionResult.queued,
+          );
+          final queued = await estimate(conversation.id, [summary]);
+          expect(queued, expected);
+          hold.complete('Budget summary');
+          await waitFor(
+            () =>
+                service.contextCompression.taskFor(conversation.id)!.phase ==
+                (stale ? CompressionPhase.completed : CompressionPhase.review),
+            'budget decision',
+          );
+          final task = service.contextCompression.taskFor(conversation.id)!;
+          if (stale) {
+            expect(task.budget!.usedTokens, lessThan(window));
+            await waitFor(
+              () => streamRequestCount == 1,
+              'stale chip notice sent',
+            );
+            await waitFor(
+              () => !controller.chatController.isConversationLoading(
+                conversation.id,
+              ),
+              'stale chip reply finished',
+            );
+            final payload = jsonEncode(streamRequests.single);
+            expect(payload, contains(omitted));
+            expect(payload, isNot(contains(frozen.exactText)));
+          } else {
+            expect(task.error, 'context_budget_exceeded');
+            expect(task.budget!.usedTokens, greaterThan(window));
+            expect(service.contextOperationsFor(conversation.id), isEmpty);
+            expect(controller.currentQueuedInputPaused, isTrue);
+            expect(controller.currentQueuedInput!.input.uiContext, attachment);
+            expect(streamRequestCount, 0);
+          }
+        });
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets('compression reuses one existing queued input per conversation', (
+    tester,
+  ) async {
+    final controller = await pumpHarness(tester);
+    await tester.runAsync(() async {
+      final a = await openConversation(controller);
+      await service.addMessage(
+        conversationId: a.id,
+        role: 'user',
+        content: 'A history ' * 100,
+      );
+      final aHold = Completer<String>();
+      var aEntered = false;
+      await service.contextCompression.start(
+        a.id,
+        CompressionRequest(
+          options: const CompressContextOptions(
+            mode: CompressContextLimitMode.unlimited,
+          ),
+          model: 'test',
+          generate: (_, _) {
+            aEntered = true;
+            return aHold.future;
+          },
+          quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+        ),
+      );
+      await waitFor(() => aEntered, 'A compression');
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'queued A')),
+        ChatInputSubmissionResult.queued,
+      );
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'second A')),
+        ChatInputSubmissionResult.rejected,
+      );
+      expect(controller.currentQueuedInput!.input.text, 'queued A');
+      final b = await openConversation(controller);
+      await service.addMessage(
+        conversationId: b.id,
+        role: 'user',
+        content: 'B history ' * 100,
+      );
+      final bHold = Completer<String>();
+      var bEntered = false;
+      await service.contextCompression.start(
+        b.id,
+        CompressionRequest(
+          options: const CompressContextOptions(
+            mode: CompressContextLimitMode.unlimited,
+          ),
+          model: 'test',
+          generate: (_, _) {
+            bEntered = true;
+            return bHold.future;
+          },
+          quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+        ),
+      );
+      await waitFor(() => bEntered, 'B compression');
+      expect(
+        await controller.sendMessage(ChatInputData(text: 'queued B')),
+        ChatInputSubmissionResult.queued,
+      );
+      expect(streamRequestCount, 0);
+      bHold.complete('B summary');
+      await waitFor(() => streamRequestCount == 1, 'only B released');
+      expect(jsonEncode(streamRequests.single), contains('queued B'));
+      expect(jsonEncode(streamRequests.single), contains('B summary'));
+      expect(jsonEncode(streamRequests.single), isNot(contains('B history')));
+      expect(service.contextCompression.taskFor(a.id)!.active, isTrue);
+      aHold.complete('A summary');
+      await waitFor(() => streamRequestCount == 2, 'A released in background');
+      expect(controller.currentConversation!.id, b.id);
+      expect(jsonEncode(streamRequests.last), contains('queued A'));
+      expect(jsonEncode(streamRequests.last), contains('A summary'));
+      expect(
+        jsonEncode(streamRequests.last),
+        isNot(contains('context-summary:')),
+      );
+      await waitFor(
+        () =>
+            !controller.chatController.isConversationLoading(a.id) &&
+            !controller.chatController.isConversationLoading(b.id),
+        'both replies finish',
+      );
+    });
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'failed compression pauses queued input until existing cancellation restores it',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final a = await openConversation(controller);
+        await service.addMessage(
+          conversationId: a.id,
+          role: 'user',
+          content: 'history ' * 100,
+        );
+        final hold = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          a.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _) {
+              entered = true;
+              return hold.future;
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression started');
+        expect(
+          await controller.sendMessage(ChatInputData(text: 'keep this draft')),
+          ChatInputSubmissionResult.queued,
+        );
+        hold.completeError(StateError('test network failure'));
+        await waitFor(
+          () => controller.currentQueuedInputPaused,
+          'queue paused',
+        );
+        expect(controller.currentQueuedInput!.input.text, 'keep this draft');
+        expect(streamRequestCount, 0);
+        await controller.cancelQueuedMessage();
+        expect(controller.currentQueuedInput, isNull);
+        expect(streamRequestCount, 0);
+      });
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'queued input waits for the full reply then compression then sends once',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        streamHold = Completer<void>();
+        await controller.sendMessage(ChatInputData(text: 'old history ' * 100));
+        await waitFor(() => streamRequestCount == 1, 'first request');
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (text, _) {
+              expect(
+                controller.chatController.isConversationLoading(
+                  conversation.id,
+                ),
+                isFalse,
+              );
+              expect(text, contains('Assistant: ok'));
+              entered = true;
+              return generated.future;
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        expect(
+          service.contextCompression.taskFor(conversation.id)!.phase,
+          CompressionPhase.waiting,
+        );
+        expect(
+          await controller.sendMessage(
+            ChatInputData(text: 'after compression'),
+          ),
+          ChatInputSubmissionResult.queued,
+        );
+        expect(entered, isFalse);
+        streamHold!.complete();
+        streamHold = null;
+        await waitFor(() => entered, 'compression after persistence');
+        expect(streamRequestCount, 1);
+        generated.complete('summary');
+        await waitFor(() => streamRequestCount == 2, 'queued request');
+        expect(jsonEncode(streamRequests.last), contains('summary'));
+        expect(jsonEncode(streamRequests.last), contains('after compression'));
+        expect(jsonEncode(streamRequests.last), isNot(contains('old history')));
+        await waitFor(
+          () =>
+              !controller.chatController.isConversationLoading(conversation.id),
+          'final reply',
+        );
+        expect(controller.currentQueuedInput, isNull);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'withdrawing existing queued attachments is not undone by compression completion',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'old context ' * 100,
+        );
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _) {
+              entered = true;
+              return generated.future;
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression');
+        final input = ChatInputData(
+          text: 'keep draft',
+          imagePaths: ['/not-read-image.png'],
+        );
+        expect(
+          await controller.sendMessage(input),
+          ChatInputSubmissionResult.queued,
+        );
+        final restored = controller.debugViewModel.cancelCurrentQueuedInput();
+        expect(restored!.text, input.text);
+        expect(restored.imagePaths, input.imagePaths);
+        generated.complete('summary');
+        await waitFor(
+          () =>
+              service.contextCompression.taskFor(conversation.id)!.phase ==
+              CompressionPhase.completed,
+          'completion',
+        );
+        expect(streamRequestCount, 0);
+        expect(controller.currentQueuedInput, isNull);
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'compression guard does not consume a recovered tool answer before continuation',
+    (tester) async {
+      final controller = await pumpHarness(tester);
+      await tester.runAsync(() async {
+        final conversation = await openConversation(controller);
+        await service.addMessage(
+          conversationId: conversation.id,
+          role: 'user',
+          content: 'old context ' * 100,
+        );
+        final arguments = <String, dynamic>{
+          'questions': [
+            {'id': 'q', 'question': 'Choose'},
+          ],
+        };
+        final reply = await service.addMessage(
+          conversationId: conversation.id,
+          role: 'assistant',
+          parts: [
+            ToolCallPart(
+              jsonEncode({
+                'id': 'pending',
+                'name': AskUserToolNames.askUser,
+                'arguments': arguments,
+                'content': null,
+              }),
+            ),
+            const AssistantRoundEndPart(),
+          ],
+        );
+        final generated = Completer<String>();
+        var entered = false;
+        await service.contextCompression.start(
+          conversation.id,
+          CompressionRequest(
+            options: const CompressContextOptions(
+              mode: CompressContextLimitMode.unlimited,
+            ),
+            model: 'test',
+            generate: (_, _) {
+              entered = true;
+              return generated.future;
+            },
+            quoteMarker: AppLocalizationsEn().selectionQuoteMarker,
+          ),
+        );
+        await waitFor(() => entered, 'compression');
+        final before = List<Map<String, dynamic>>.of(
+          service.getToolEvents(reply.id),
+        );
+        await controller.submitRecoveredAskUserAnswer(
+          reply,
+          ToolUIPart(
+            id: 'pending',
+            toolName: AskUserToolNames.askUser,
+            arguments: arguments,
+            loading: true,
+          ),
+          const AskUserResult.answer({
+            'q': AskUserAnswerValue.single(value: 'keep pending', custom: true),
+          }),
+        );
+        expect(service.getToolEvents(reply.id), before);
+        expect(streamRequestCount, 0);
+        await service.contextCompression.cancel(conversation.id);
+        generated.complete('late summary');
+      });
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets('concurrent sends persist a single user/assistant pair', (
     tester,
@@ -2404,7 +3266,7 @@ void main() {
         final question = (await service.loadMessages(
           target.id,
         )).firstWhere((m) => m.role == 'user');
-        await service.toggleTruncateAtTail(target.id);
+        await service.clearConversationContext(target.id);
         final current = service.getConversation(target.id)!;
         final choices = await repository.getSelectedMessageProjections(
           target.id,
